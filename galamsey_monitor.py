@@ -253,10 +253,10 @@ class GalamseyMonitorApp(QWidget):
         self.date1_end.setCalendarPopup(True)
         self.date2_start.setCalendarPopup(True)
         self.date2_end.setCalendarPopup(True)
-        self.date1_start.setDisplayFormat("dd-MM-yyyy")
-        self.date1_end.setDisplayFormat("dd-MM-yyyy")
-        self.date2_start.setDisplayFormat("dd-MM-yyyy")
-        self.date2_end.setDisplayFormat("dd-MM-yyyy")
+        self.date1_start.setDisplayFormat("yyyy-MM-dd")
+        self.date1_end.setDisplayFormat("yyyy-MM-dd")
+        self.date2_start.setDisplayFormat("yyyy-MM-dd")
+        self.date2_end.setDisplayFormat("yyyy-MM-dd")
 
 
         input_layout.addRow(QLabel("AOI Coordinates (lon_min, lat_min, lon_max, lat_max):"), self.coord_input)
@@ -333,10 +333,10 @@ class GalamseyMonitorApp(QWidget):
             if not (aoi_coords[0] < aoi_coords[2] and aoi_coords[1] < aoi_coords[3]):
                  raise ValueError("Invalid coordinates order (must be min_lon, min_lat, max_lon, max_lat).")
 
-            start1 = self.date1_start.date().toString("dd-MM-yyyy")
-            end1 = self.date1_end.date().toString("dd-MM-yyyy")
-            start2 = self.date2_start.date().toString("dd-MM-yyyy")
-            end2 = self.date2_end.date().toString("dd-MM-yyyy")
+            start1 = self.date1_start.date().toString("yyyy-MM-dd")
+            end1 = self.date1_end.date().toString("yyyy-MM-dd")
+            start2 = self.date2_start.date().toString("yyyy-MM-dd")
+            end2 = self.date2_end.date().toString("yyyy-MM-dd")
             threshold = self.threshold_input.value()
 
             # Validate date ranges
