@@ -1,47 +1,138 @@
 import sys
 import io
-import threading # To run GEE tasks in the background
-import traceback # For detailed error logging
+import threading
+import traceback
+import os
+import tempfile # For creating temporary directories
+import glob # For finding image files
 
 import ee
-import requests # To fetch the image from the URL
-from PIL import Image # To process the image data
+import requests
+from PIL import Image
+import cv2 # OpenCV for video creation
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QDateEdit, QDoubleSpinBox, QTextEdit, QFormLayout,
-    QGroupBox, QProgressDialog, QMessageBox
+    QGroupBox, QProgressDialog, QMessageBox, QSpinBox, QFileDialog
 )
 from PyQt6.QtGui import QPixmap, QImage
 from PyQt6.QtCore import QDate, pyqtSignal, QObject, Qt, QMetaObject, Q_ARG
 
-
-# --- Worker Object Signals ---
-# Necessary to emit signals from a non-GUI thread back to the GUI thread
+# --- Worker Signals (reused for both workers) ---
 class WorkerSignals(QObject):
-    finished = pyqtSignal(object) # Pass the result (PIL image or None)
-    error = pyqtSignal(str)       # Pass error message
-    progress = pyqtSignal(str)    # Pass status updates
+    finished = pyqtSignal(object)
+    error = pyqtSignal(str)
+    progress = pyqtSignal(str)
+    # New signal for time-lapse, passing current frame and total frames
+    frame_processed = pyqtSignal(int, int)
 
-# --- Cloud Masking Function (using SCL - NEEDS TO BE DEFINED GLOBALLY) ---
-# Define this function *before* the GEEWorker class
+
+# --- Cloud Masking Function (SCL) ---
 def mask_s2_clouds_scl(image):
-    """Masks clouds in a Sentinel-2 SR image using the SCL band."""
     scl = image.select('SCL')
-    # Define SCL values to mask (treat as unusable/cloudy)
-    # 3: Cloud Shadow, 8: Cloud Medium Prob, 9: Cloud High Prob, 10: Cirrus
     unwanted_classes = [3, 8, 9, 10]
-    # Create a mask where non-cloudy pixels are 1, others are 0.
     mask = scl.neq(3).And(scl.neq(8)).And(scl.neq(9)).And(scl.neq(10))
-    # Apply mask and scale reflectance values (common for SR products)
     return image.updateMask(mask).divide(10000).copyProperties(image, ["system:time_start"])
-# -------------------------------------------------------------------------
 
 
-# --- GEE Processing Worker ---
+# --- GEE Single Frame Processing Logic (Extracted for reusability) ---
+def process_single_gee_frame(aoi_coords, period1_start, period1_end,
+                             period2_start, period2_end, threshold_val,
+                             thumb_size_val, project_id, progress_emitter=None):
+    """
+    Processes a single frame for GEE analysis.
+    Returns a PIL.Image or None if an error occurs or no significant change.
+    `progress_emitter` is a function like `worker.signals.progress.emit`.
+    """
+    if progress_emitter:
+        progress_emitter(f"Initializing GEE for frame ({period2_start}-{period2_end})...")
+
+    try:
+        ee.Initialize(project=project_id)
+    except Exception as init_e:
+        if progress_emitter:
+            progress_emitter(f"GEE Init failed for frame: {init_e}")
+        raise init_e # Re-raise to be caught by caller
+
+    aoi = ee.Geometry.Rectangle(aoi_coords)
+
+    def calculate_ndvi(image):
+        return image.normalizedDifference(['B8', 'B4']).rename('NDVI')
+
+    s2_sr = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+
+    rgb_viz_params = {'bands': ['B4', 'B3', 'B2'], 'min': 0.0, 'max': 0.3, 'gamma': 1.4}
+    loss_viz_params = {'palette': ['red']}
+
+    # Period 1 (Baseline)
+    if progress_emitter: progress_emitter(f"Frame: Processing Baseline ({period1_start}-{period1_end})...")
+    collection_p1_base = s2_sr.filterBounds(aoi).filterDate(period1_start, period1_end).map(mask_s2_clouds_scl)
+    count1 = collection_p1_base.size().getInfo()
+    if count1 == 0:
+        if progress_emitter: progress_emitter(f"Frame: No cloud-free images for Baseline.")
+        return None # Or raise an error specific to this
+    median_ndvi_p1 = collection_p1_base.map(calculate_ndvi).select('NDVI').median()
+
+    # Period 2 (Current period for this frame)
+    if progress_emitter: progress_emitter(f"Frame: Processing Period 2 ({period2_start}-{period2_end})...")
+    collection_p2_base = s2_sr.filterBounds(aoi).filterDate(period2_start, period2_end).map(mask_s2_clouds_scl)
+    count2 = collection_p2_base.size().getInfo()
+    if count2 == 0:
+        if progress_emitter: progress_emitter(f"Frame: No cloud-free images for Period 2.")
+        return None # Or raise an error
+    median_ndvi_p2 = collection_p2_base.map(calculate_ndvi).select('NDVI').median()
+    median_rgb_p2 = collection_p2_base.select(['B4', 'B3', 'B2']).median()
+
+    # Change & Loss Mask
+    if progress_emitter: progress_emitter("Frame: Calculating NDVI change...")
+    ndvi_change = median_ndvi_p2.subtract(median_ndvi_p1).rename('NDVI_Change')
+    loss_mask = ndvi_change.lt(threshold_val).selfMask()
+
+    # Visual Layers
+    if progress_emitter: progress_emitter("Frame: Creating visual layers...")
+    background_layer = median_rgb_p2.visualize(**rgb_viz_params)
+    loss_overlay = loss_mask.visualize(**loss_viz_params)
+    final_image_viz = ee.ImageCollection([background_layer, loss_overlay]).mosaic().clip(aoi)
+
+    # Thumbnail
+    if progress_emitter: progress_emitter("Frame: Generating thumbnail...")
+    thumb_url = None
+    try:
+        thumb_url = final_image_viz.getThumbURL({
+            'region': aoi.getInfo()['coordinates'],
+            'dimensions': thumb_size_val, 'format': 'png'
+        })
+    except ee.EEException as thumb_e:
+        if "No valid pixels" in str(thumb_e) or "Image has no bands" in str(thumb_e):
+            if progress_emitter: progress_emitter("Frame: No significant loss or vis issue. Generating background only.")
+            try:
+                thumb_url = background_layer.getThumbURL({
+                    'region': aoi.getInfo()['coordinates'],
+                    'dimensions': thumb_size_val, 'format': 'png'
+                })
+            except Exception as bg_thumb_e:
+                if progress_emitter: progress_emitter(f"Frame: Error getting background thumbnail: {bg_thumb_e}")
+                raise bg_thumb_e # Re-raise
+        else:
+            raise thumb_e # Re-raise other GEE exceptions
+
+    if not thumb_url:
+        if progress_emitter: progress_emitter("Frame: Failed to generate thumbnail URL.")
+        return None # Indicate failure to get a URL
+
+    # Fetch and process image
+    if progress_emitter: progress_emitter("Frame: Downloading image...")
+    response = requests.get(thumb_url)
+    response.raise_for_status()
+    img_data = response.content
+    pil_image = Image.open(io.BytesIO(img_data))
+    return pil_image
+
+
+# --- GEE Single Analysis Worker (largely unchanged, but now uses the shared function) ---
 class GEEWorker(QObject):
-    """Handles Google Earth Engine tasks in a separate thread."""
-    def __init__(self, aoi_coords, start1, end1, start2, end2, threshold, thumb_size=512):
+    def __init__(self, aoi_coords, start1, end1, start2, end2, threshold, thumb_size=512, project_id='galamsey-monitor'):
         super().__init__()
         self.signals = WorkerSignals()
         self.aoi_coords = aoi_coords
@@ -51,431 +142,436 @@ class GEEWorker(QObject):
         self.end2 = end2
         self.threshold = threshold
         self.thumb_size = thumb_size
+        self.project_id = project_id # Pass project ID
+        self.is_cancelled = False # Cancellation not fully implemented in this simple GEE call
+
+    def run(self):
+        try:
+            pil_image = process_single_gee_frame(
+                self.aoi_coords, self.start1, self.end1, self.start2, self.end2,
+                self.threshold, self.thumb_size, self.project_id,
+                self.signals.progress.emit # Pass the progress emitter
+            )
+            self.signals.finished.emit(pil_image)
+        except Exception as e:
+            tb_str = traceback.format_exc()
+            self.signals.error.emit(f"Error in GEEWorker: {e}\nTrace: {tb_str}")
+
+
+# --- Time-Lapse Generation Worker ---
+class TimeLapseWorker(QObject):
+    def __init__(self, aoi_coords, baseline_start_date, baseline_end_date,
+                 timelapse_start_year, timelapse_end_year, threshold,
+                 thumb_size=512, project_id='galamsey-monitor', output_video_path="galamsey_timelapse.mp4", fps=1):
+        super().__init__()
+        self.signals = WorkerSignals()
+        self.aoi_coords = aoi_coords
+        self.baseline_start_date = baseline_start_date
+        self.baseline_end_date = baseline_end_date
+        self.timelapse_start_year = timelapse_start_year
+        self.timelapse_end_year = timelapse_end_year
+        self.threshold = threshold
+        self.thumb_size = thumb_size
+        self.project_id = project_id
+        self.output_video_path = output_video_path
+        self.fps = fps
         self.is_cancelled = False
 
     def run(self):
-        """Executes the GEE analysis."""
+        temp_dir = tempfile.mkdtemp(prefix="galamsey_frames_")
+        self.signals.progress.emit(f"Temporary image frames will be saved in: {temp_dir}")
+        frame_paths = []
+        total_frames = self.timelapse_end_year - self.timelapse_start_year + 1
+
         try:
-            self.signals.progress.emit("Initializing Earth Engine...")
-            try:
-                # Initialize EE within the thread. Replace with your Project ID.
-                ee.Initialize(project='galamsey-monitor')       #   <<<<<================== todo
-            except Exception as init_e:
-                self.signals.error.emit(f"GEE Initialization failed: {init_e}")
+            for i, year in enumerate(range(self.timelapse_start_year, self.timelapse_end_year + 1)):
+                if self.is_cancelled:
+                    self.signals.progress.emit("Time-lapse generation cancelled.")
+                    break
+
+                self.signals.frame_processed.emit(i + 1, total_frames) # Update progress
+                self.signals.progress.emit(f"Processing frame for year: {year} ({i+1}/{total_frames})")
+
+                period2_start = f"{year}-01-01"
+                period2_end = f"{year}-12-31"
+
+                try:
+                    pil_image = process_single_gee_frame(
+                        self.aoi_coords, self.baseline_start_date, self.baseline_end_date,
+                        period2_start, period2_end, self.threshold, self.thumb_size,
+                        self.project_id, self.signals.progress.emit
+                    )
+
+                    if pil_image:
+                        # Convert PIL RGBA (from PNG) to RGB for OpenCV if necessary
+                        if pil_image.mode == 'RGBA':
+                            pil_image = pil_image.convert('RGB')
+                        frame_filename = os.path.join(temp_dir, f"frame_{i:04d}.png")
+                        pil_image.save(frame_filename)
+                        frame_paths.append(frame_filename)
+                        self.signals.progress.emit(f"Saved frame for {year}: {frame_filename}")
+                    else:
+                        self.signals.progress.emit(f"Skipping frame for {year} (no image generated).")
+
+                except Exception as frame_e:
+                    self.signals.progress.emit(f"Error processing frame for year {year}: {frame_e}. Skipping.")
+                    # Decide if you want to stop on error or continue
+                    # continue
+
+            if self.is_cancelled:
+                self.signals.error.emit("Time-lapse cancelled before video compilation.")
                 return
 
-            self.signals.progress.emit("Defining AOI...")
-            if self.is_cancelled: return
-            aoi = ee.Geometry.Rectangle(self.aoi_coords)
-
-            # --- Define GEE Calculation Functions ---
-            def calculate_ndvi(image):
-                """Calculates NDVI for a Sentinel-2 image."""
-                return image.normalizedDifference(['B8', 'B4']).rename('NDVI')
-
-            # Reference the globally defined SCL cloud mask function
-            # mask_s2_clouds_scl is defined outside this class
-
-            # Use the recommended Harmonized Sentinel-2 Surface Reflectance collection
-            s2_sr = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
-
-            # --- Define Visualization Parameters ---
-            # For the background satellite image (True Color)
-            rgb_viz_params = {
-                'bands': ['B4', 'B3', 'B2'], # Red, Green, Blue bands
-                'min': 0.0,                 # Minimum reflectance
-                'max': 0.3,                 # Max reflectance (adjust for brightness)
-                'gamma': 1.4                # Adjust contrast if needed
-            }
-            # For the loss overlay (Solid Red for clarity)
-            loss_viz_params = {
-                'palette': ['red'] # Solid red for pixels meeting loss threshold
-                # min/max not needed here as we'll visualize the mask directly
-            }
-
-            # --- Process Period 1 (Need only NDVI median) ---
-            self.signals.progress.emit(f"Processing Period 1 ({self.start1} to {self.end1})...")
-            if self.is_cancelled: return
-            collection_p1_base = s2_sr.filterBounds(aoi) \
-                                      .filterDate(self.start1, self.end1) \
-                                      .map(mask_s2_clouds_scl) # Apply SCL mask
-
-            count1 = collection_p1_base.size().getInfo()
-            if count1 == 0:
-                self.signals.error.emit(f"No cloud-free images found for Period 1 in AOI.")
-                return
-            median_ndvi_p1 = collection_p1_base.map(calculate_ndvi).select('NDVI').median()
-
-
-            # --- Process Period 2 (Need NDVI median and RGB median) ---
-            self.signals.progress.emit(f"Processing Period 2 ({self.start2} to {self.end2})...")
-            if self.is_cancelled: return
-            collection_p2_base = s2_sr.filterBounds(aoi) \
-                                      .filterDate(self.start2, self.end2) \
-                                      .map(mask_s2_clouds_scl) # Apply SCL mask
-
-            count2 = collection_p2_base.size().getInfo()
-            if count2 == 0:
-                self.signals.error.emit(f"No cloud-free images found for Period 2 in AOI.")
-                return
-            median_ndvi_p2 = collection_p2_base.map(calculate_ndvi).select('NDVI').median()
-            # Create a median RGB image for Period 2 background
-            median_rgb_p2 = collection_p2_base.select(['B4', 'B3', 'B2']).median()
-
-
-            # --- Calculate Change & Identify Loss Mask---
-            self.signals.progress.emit("Calculating NDVI change...")
-            if self.is_cancelled: return
-            ndvi_change = median_ndvi_p2.subtract(median_ndvi_p1).rename('NDVI_Change')
-            # Create a mask image: 1 where loss occurred, masked (0) otherwise
-            loss_mask = ndvi_change.lt(self.threshold).selfMask()
-
-
-            # --- Create Visual Layers ---
-            self.signals.progress.emit("Creating visual layers...")
-            if self.is_cancelled: return
-            # 1. Background Layer: Visualize the median RGB image from Period 2
-            background_layer = median_rgb_p2.visualize(**rgb_viz_params)
-
-            # 2. Loss Overlay Layer: Visualize the loss mask directly in red
-            loss_overlay = loss_mask.visualize(**loss_viz_params)
-
-
-            # --- Combine Layers ---
-            # Mosaic the layers. Loss overlay is drawn on top of the background.
-            # Where loss_overlay is masked (no significant loss), the background shows through.
-            final_image = ee.ImageCollection([
-                background_layer,
-                loss_overlay
-            ]).mosaic().clip(aoi) # Clip final mosaic to AOI bounds
-
-
-            # --- Get Thumbnail URL of the Combined Image ---
-            self.signals.progress.emit("Generating composite map preview...")
-            if self.is_cancelled: return
-            thumb_url = None # Initialize thumb_url
-            try:
-                # Get ThumbURL for the already visualized, mosaicked image
-                thumb_url = final_image.getThumbURL({
-                    'region': aoi.getInfo()['coordinates'], # Pass coordinates directly
-                    'dimensions': self.thumb_size,
-                    'format': 'png' # Request PNG format
-                })
-            except ee.EEException as thumb_e:
-                 # Check common errors indicating no loss pixels or issues visualizing
-                 if "No valid pixels" in str(thumb_e) or \
-                    "Image has no bands" in str(thumb_e) or \
-                    "Request payload size exceeds the limit" in str(thumb_e): # Add check for large AOI
-                     self.signals.progress.emit("Calculation complete. No significant loss detected or issue visualizing loss layer.")
-                     self.signals.progress.emit("Generating background map only...")
-                     # If visualizing loss fails (e.g., no loss pixels), try getting just the background
-                     try:
-                         background_thumb_url = background_layer.getThumbURL({
-                             'region': aoi.getInfo()['coordinates'],
-                             'dimensions': self.thumb_size,
-                             'format': 'png'
-                         })
-                         thumb_url = background_thumb_url # Use background URL instead
-                     except Exception as bg_thumb_e:
-                          self.signals.error.emit(f"GEE Error getting background map preview: {bg_thumb_e}")
-                          return
-                 else:
-                    # Re-raise other GEE exceptions
-                    raise thumb_e
-            except Exception as e:
-                # Catch other potential errors (e.g., during getInfo)
-                self.signals.error.emit(f"Error during thumbnail URL generation: {e}")
+            if not frame_paths:
+                self.signals.error.emit("No frames were generated. Cannot create video.")
                 return
 
-            # Check if we actually got a URL
-            if not thumb_url:
-                 self.signals.error.emit("Failed to generate a thumbnail URL for the map.")
-                 return
+            self.signals.progress.emit("All frames processed. Compiling video...")
+            # Determine video size from the first frame
+            first_frame_img = cv2.imread(frame_paths[0])
+            if first_frame_img is None:
+                self.signals.error.emit(f"Could not read first frame: {frame_paths[0]}")
+                return
+            height, width, layers = first_frame_img.shape
+            size = (width, height)
 
-            # --- Fetch Image Data ---
-            self.signals.progress.emit("Downloading map image...")
-            if self.is_cancelled: return
-            response = requests.get(thumb_url)
-            response.raise_for_status() # Raise an exception for bad HTTP status codes
+            # Define the codec and create VideoWriter object
+            # Try common codecs if 'mp4v' fails on some systems (e.g., 'XVID')
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v') # For .mp4
+            out_video = cv2.VideoWriter(self.output_video_path, fourcc, self.fps, size)
 
-            # --- Process Image with PIL ---
-            self.signals.progress.emit("Processing image...")
-            if self.is_cancelled: return
-            img_data = response.content
-            pil_image = Image.open(io.BytesIO(img_data))
+            for frame_path in sorted(frame_paths): # Ensure correct order
+                img = cv2.imread(frame_path)
+                if img is not None:
+                    out_video.write(img)
+                else:
+                    self.signals.progress.emit(f"Warning: Could not read frame {frame_path} for video.")
 
-            # Emit the result (the PIL image)
-            self.signals.finished.emit(pil_image)
+            out_video.release()
+            self.signals.progress.emit(f"Video compilation complete: {self.output_video_path}")
+            self.signals.finished.emit(self.output_video_path)
 
-        except requests.exceptions.RequestException as req_e:
-            self.signals.error.emit(f"Network Error downloading map: {req_e}")
-        except ee.EEException as gee_e:
-             self.signals.error.emit(f"Google Earth Engine Error: {gee_e}")
         except Exception as e:
-            # Log detailed traceback for unexpected errors
             tb_str = traceback.format_exc()
-            self.signals.error.emit(f"An unexpected error occurred in worker thread: {e}\nTrace: {tb_str}")
+            self.signals.error.emit(f"Error during time-lapse generation: {e}\nTrace: {tb_str}")
+        finally:
+            # Clean up temporary frame images
+            self.signals.progress.emit("Cleaning up temporary frames...")
+            for fp in frame_paths:
+                try:
+                    os.remove(fp)
+                except OSError:
+                    pass # Ignore if already removed or other issue
+            try:
+                os.rmdir(temp_dir)
+                self.signals.progress.emit("Temporary directory removed.")
+            except OSError:
+                self.signals.progress.emit(f"Could not remove temporary directory: {temp_dir}. Please remove manually.")
 
 
 # --- Main Application Window ---
 class GalamseyMonitorApp(QWidget):
-    """Main GUI Application Window."""
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Simple Galamsey Monitor")
-        self.setGeometry(100, 100, 800, 650) # Increased height slightly
+        self.setWindowTitle("Galamsey Monitor with Time-Lapse")
+        self.setGeometry(100, 100, 850, 750) # Adjusted size
 
         self.worker_thread = None
         self.worker = None
+        self.timelapse_worker_thread = None
+        self.timelapse_worker = None
         self.progress_dialog = None
+        self.project_id = 'galamsey-monitor' # Set your project ID here
 
         # --- Layouts ---
         main_layout = QVBoxLayout(self)
-        input_layout = QFormLayout()
-        map_layout = QVBoxLayout()
-        status_layout = QVBoxLayout()
 
-        # --- Input Widgets ---
-        input_group = QGroupBox("Analysis Parameters")
-        # Example coordinates (adjust as needed)
-        self.coord_input = QLineEdit("-1.795049, 6.335836, -1.745373, 6.365126")
-        self.date1_start = QDateEdit(QDate(2020, 1, 1))
-        self.date1_end = QDateEdit(QDate(2020, 12, 31))
-        self.date2_start = QDateEdit(QDate(2025, 1, 1)) # Using a past date for Period 2
-        self.date2_end = QDateEdit(QDate(2025, 5, 5)) # Using a past date for Period 2
+        # Single Analysis Section
+        single_analysis_group = QGroupBox("Single Period Analysis")
+        single_analysis_layout = QVBoxLayout()
+        input_form_layout = QFormLayout()
+
+        self.coord_input = QLineEdit("-1.933843, 6.242898, -1.794923, 6.307095") # Corrected example
+        self.date1_start = QDateEdit(QDate(2017, 1, 1)) # Baseline year
+        self.date1_end = QDateEdit(QDate(2017, 12, 31))
+        self.date2_start = QDateEdit(QDate(2019, 1, 1)) # Example comparison year
+        self.date2_end = QDateEdit(QDate(2019, 12, 31))
         self.threshold_input = QDoubleSpinBox()
-        self.threshold_input.setRange(-1.0, 0.0)
-        self.threshold_input.setSingleStep(0.05)
-        self.threshold_input.setValue(-0.20) # Default threshold
-        self.analyze_button = QPushButton("Analyze Area")
+        self.threshold_input.setRange(-1.0, 0.0); self.threshold_input.setSingleStep(0.05); self.threshold_input.setValue(-0.20)
+        self.analyze_button = QPushButton("Analyze Single Period")
 
-        self.date1_start.setCalendarPopup(True)
-        self.date1_end.setCalendarPopup(True)
-        self.date2_start.setCalendarPopup(True)
-        self.date2_end.setCalendarPopup(True)
-        self.date1_start.setDisplayFormat("yyyy-MM-dd")
-        self.date1_end.setDisplayFormat("yyyy-MM-dd")
-        self.date2_start.setDisplayFormat("yyyy-MM-dd")
-        self.date2_end.setDisplayFormat("yyyy-MM-dd")
+        for dt_edit in [self.date1_start, self.date1_end, self.date2_start, self.date2_end]:
+            dt_edit.setCalendarPopup(True)
+            dt_edit.setDisplayFormat("yyyy-MM-dd")
 
+        input_form_layout.addRow(QLabel("AOI Coordinates (lon_min, lat_min, lon_max, lat_max):"), self.coord_input)
+        input_form_layout.addRow(QLabel("Period 1 Start (Baseline):"), self.date1_start)
+        input_form_layout.addRow(QLabel("Period 1 End (Baseline):"), self.date1_end)
+        input_form_layout.addRow(QLabel("Period 2 Start (Comparison):"), self.date2_start)
+        input_form_layout.addRow(QLabel("Period 2 End (Comparison):"), self.date2_end)
+        input_form_layout.addRow(QLabel("NDVI Change Threshold (Loss):"), self.threshold_input)
+        input_form_layout.addRow(self.analyze_button)
+        single_analysis_layout.addLayout(input_form_layout)
 
-        input_layout.addRow(QLabel("AOI Coordinates (lon_min, lat_min, lon_max, lat_max):"), self.coord_input)
-        input_layout.addRow(QLabel("Period 1 Start Date:"), self.date1_start)
-        input_layout.addRow(QLabel("Period 1 End Date:"), self.date1_end)
-        input_layout.addRow(QLabel("Period 2 Start Date:"), self.date2_start)
-        input_layout.addRow(QLabel("Period 2 End Date:"), self.date2_end)
-        input_layout.addRow(QLabel("NDVI Change Threshold (Loss):"), self.threshold_input)
-        input_layout.addRow(self.analyze_button)
-        input_group.setLayout(input_layout)
-
-        # --- Map Display Widget ---
+        # Map Display
         map_group = QGroupBox("Map Preview (Red shows potential vegetation loss)")
-        self.map_label = QLabel("Map will appear here after analysis.")
+        map_v_layout = QVBoxLayout()
+        self.map_label = QLabel("Map will appear here after single analysis.")
         self.map_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.map_label.setMinimumSize(500, 400) # Adjust size as needed
+        self.map_label.setMinimumSize(500, 300)
         self.map_label.setStyleSheet("QLabel { border: 1px solid gray; background-color: #f0f0f0; }")
-        map_layout.addWidget(self.map_label)
-        map_group.setLayout(map_layout)
+        map_v_layout.addWidget(self.map_label)
+        map_group.setLayout(map_v_layout)
+        single_analysis_layout.addWidget(map_group)
+        single_analysis_group.setLayout(single_analysis_layout)
+        main_layout.addWidget(single_analysis_group)
 
-        # --- Status Widget ---
+
+        # Time-Lapse Section
+        timelapse_group = QGroupBox("Time-Lapse Generation")
+        timelapse_layout = QFormLayout()
+        self.timelapse_start_year_input = QSpinBox()
+        self.timelapse_start_year_input.setRange(2000, QDate.currentDate().year())
+        self.timelapse_start_year_input.setValue(2018) # Example start for timelapse
+        self.timelapse_end_year_input = QSpinBox()
+        self.timelapse_end_year_input.setRange(2000, QDate.currentDate().year() + 5) # Allow a bit into future
+        self.timelapse_end_year_input.setValue(2022) # Example end for timelapse
+        self.timelapse_fps_input = QSpinBox()
+        self.timelapse_fps_input.setRange(1, 30); self.timelapse_fps_input.setValue(1) # 1 frame (year) per second
+        self.generate_timelapse_button = QPushButton("Generate Time-Lapse Video")
+
+        timelapse_layout.addRow(QLabel("Time-Lapse Start Year:"), self.timelapse_start_year_input)
+        timelapse_layout.addRow(QLabel("Time-Lapse End Year:"), self.timelapse_end_year_input)
+        timelapse_layout.addRow(QLabel("Video FPS (Frames/Years per Second):"), self.timelapse_fps_input)
+        timelapse_layout.addRow(self.generate_timelapse_button)
+        timelapse_group.setLayout(timelapse_layout)
+        main_layout.addWidget(timelapse_group)
+
+        # Status Log
         status_group = QGroupBox("Status Log")
+        status_v_layout = QVBoxLayout()
         self.status_log = QTextEdit()
-        self.status_log.setReadOnly(True)
-        self.status_log.setFixedHeight(100)
-        status_layout.addWidget(self.status_log)
-        status_group.setLayout(status_layout)
-
-        # --- Assemble Main Layout ---
-        main_layout.addWidget(input_group)
-        main_layout.addWidget(map_group)
+        self.status_log.setReadOnly(True); self.status_log.setFixedHeight(150)
+        status_v_layout.addWidget(self.status_log)
+        status_group.setLayout(status_v_layout)
         main_layout.addWidget(status_group)
 
-        # --- Connections ---
-        self.analyze_button.clicked.connect(self.run_analysis)
+        # Connections
+        self.analyze_button.clicked.connect(self.run_single_analysis)
+        self.generate_timelapse_button.clicked.connect(self.run_timelapse_generation)
 
-        # --- Initial GEE Check ---
+        self.init_gee_check()
+
+    def init_gee_check(self):
         self.log_status("Attempting to initialize Google Earth Engine...")
         try:
-            # Initialize GEE on startup. Replace with your Project ID.
-            ee.Initialize(project='galamsey-monitor')   #   <<<<<===============    todo
+            ee.Initialize(project=self.project_id)
             self.log_status("Google Earth Engine initialized successfully.")
         except Exception as e:
-            self.log_status(f"ERROR: Failed to initialize GEE on startup: {e}")
-            self.log_status("Please ensure GEE is authenticated ('earthengine authenticate'),")
-            self.log_status("the project ID is correct, and the Earth Engine API is enabled in Google Cloud.")
-            QMessageBox.critical(self, "GEE Initialization Error",
-                                 f"Failed to initialize Google Earth Engine:\n{e}\n\n"
-                                 "Please ensure:\n"
-                                 "1. You have run 'earthengine authenticate' in your terminal.\n"
-                                 "2. You have internet access.\n"
-                                 "3. The project ID ('galamsey-monitor') is correct.\n"
-                                 "4. The Earth Engine API is enabled for this project in Google Cloud Console.")
-            self.analyze_button.setEnabled(False)
+            self.handle_gee_init_error(e)
+
+    def handle_gee_init_error(self, e):
+        msg = (f"ERROR: Failed to initialize GEE: {e}\n\n"
+               "Please ensure:\n"
+               "1. You have run 'earthengine authenticate'.\n"
+               "2. You have internet access.\n"
+               f"3. The project ID ('{self.project_id}') is correct.\n"
+               "4. The Earth Engine API is enabled for this project in Google Cloud Console.")
+        self.log_status(msg.replace("\n\n", "\n").replace("\n", "\nStatus: ")) # Log more concisely
+        QMessageBox.critical(self, "GEE Initialization Error", msg)
+        self.analyze_button.setEnabled(False)
+        self.generate_timelapse_button.setEnabled(False)
+
 
     def log_status(self, message):
-        """Appends a message to the status log."""
         self.status_log.append(message)
-        QApplication.processEvents() # Allow UI updates during logging
+        QApplication.processEvents()
 
-    def run_analysis(self):
-        """Starts the GEE analysis process in a background thread."""
-        self.log_status("Starting analysis...")
+    def setup_progress_dialog(self, title="Processing..."):
+        if self.progress_dialog: # Close existing if any
+            self.progress_dialog.close()
+        self.progress_dialog = QProgressDialog(title, "Cancel", 0, 100, self) # 0-100 for %
+        self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        self.progress_dialog.setAutoClose(False)
+        self.progress_dialog.setAutoReset(False)
+        self.progress_dialog.setMinimumDuration(0)
+        self.progress_dialog.setValue(0) # Start at 0%
+        return self.progress_dialog
+
+
+    def run_single_analysis(self):
+        self.log_status("Starting single period analysis...")
         self.analyze_button.setEnabled(False)
-        self.map_label.setText("Processing... Please wait.")
-        self.map_label.setPixmap(QPixmap()) # Clear previous map
+        self.generate_timelapse_button.setEnabled(False) # Disable other button too
+        self.map_label.setText("Processing... Please wait."); self.map_label.setPixmap(QPixmap())
 
-        # --- Get Inputs and Validate ---
         try:
+            # Input validation (similar to your existing one)
             coords_str = self.coord_input.text().strip().split(',')
-            if len(coords_str) != 4:
-                raise ValueError("Coordinates must be 4 comma-separated numbers.")
+            if len(coords_str) != 4: raise ValueError("Coords: 4 numbers.")
             aoi_coords = [float(c.strip()) for c in coords_str]
             if not (aoi_coords[0] < aoi_coords[2] and aoi_coords[1] < aoi_coords[3]):
-                 raise ValueError("Invalid coordinates order (must be min_lon, min_lat, max_lon, max_lat).")
+                 raise ValueError("Coords order: min_lon, min_lat, max_lon, max_lat.")
 
             start1 = self.date1_start.date().toString("yyyy-MM-dd")
             end1 = self.date1_end.date().toString("yyyy-MM-dd")
             start2 = self.date2_start.date().toString("yyyy-MM-dd")
             end2 = self.date2_end.date().toString("yyyy-MM-dd")
             threshold = self.threshold_input.value()
-
-            # Validate date ranges
-            date_start1 = self.date1_start.date()
-            date_end1 = self.date1_end.date()
-            date_start2 = self.date2_start.date()
-            date_end2 = self.date2_end.date()
-
-            if date_start1 >= date_end1 or date_start2 >= date_end2:
-                raise ValueError("Start date must be before end date for each period.")
-            if date_end1 >= date_start2:
-                 raise ValueError("Period 1 must end before Period 2 begins.")
-            # Check if Period 2 is in the future (optional, but good practice)
-            if date_start2 > QDate.currentDate():
-                 QMessageBox.warning(self, "Future Date Warning",
-                                     "Period 2 starts in the future. Analysis will use data up to the present.")
+            # Date range validation
+            if self.date1_start.date() >= self.date1_end.date() or \
+               self.date2_start.date() >= self.date2_end.date() or \
+               self.date1_end.date() >= self.date2_start.date():
+                raise ValueError("Date ranges invalid/overlapping.")
 
         except ValueError as ve:
-            self.log_status(f"ERROR: Invalid input - {ve}")
-            QMessageBox.warning(self, "Input Error", f"Invalid input:\n{ve}")
-            self.analyze_button.setEnabled(True)
-            return
-        except Exception as e:
-            self.log_status(f"ERROR: Unexpected input error - {e}")
-            QMessageBox.warning(self, "Input Error", f"Unexpected input error:\n{e}")
-            self.analyze_button.setEnabled(True)
+            self.log_status(f"Input Error: {ve}"); QMessageBox.warning(self, "Input Error", f"{ve}")
+            self.analyze_button.setEnabled(True); self.generate_timelapse_button.setEnabled(True)
             return
 
-        # --- Setup Progress Dialog ---
-        self.progress_dialog = QProgressDialog("Running GEE Analysis...", "Cancel", 0, 0, self)
-        self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
-        self.progress_dialog.setAutoClose(False) # Keep open until explicitly closed
-        self.progress_dialog.setAutoReset(False)
-        self.progress_dialog.setMinimumDuration(0) # Show immediately
-        self.progress_dialog.canceled.connect(self.cancel_analysis)
-        self.progress_dialog.setValue(0) # Use as indeterminate progress bar
-        self.progress_dialog.show()
+        progress_dialog = self.setup_progress_dialog("Running Single Analysis...")
+        progress_dialog.canceled.connect(self.cancel_single_analysis)
+        progress_dialog.show()
 
-        # --- Setup Worker Thread ---
-        self.worker = GEEWorker(aoi_coords, start1, end1, start2, end2, threshold)
-        self.worker_thread = threading.Thread(target=self.worker.run, daemon=True) # Use daemon thread
-
-        # Connect worker signals to GUI slots
-        self.worker.signals.finished.connect(self.on_analysis_complete)
-        self.worker.signals.error.connect(self.on_analysis_error)
-        self.worker.signals.progress.connect(self.update_progress)
-
-        # Start the thread
+        self.worker = GEEWorker(aoi_coords, start1, end1, start2, end2, threshold, project_id=self.project_id)
+        self.worker_thread = threading.Thread(target=self.worker.run, daemon=True)
+        self.worker.signals.finished.connect(self.on_single_analysis_complete)
+        self.worker.signals.error.connect(self.on_single_analysis_error)
+        self.worker.signals.progress.connect(self.update_progress_label_only) # No percentage for single
         self.worker_thread.start()
 
-    def update_progress(self, message):
-        """Updates the status log and progress dialog message."""
+    def update_progress_label_only(self, message):
+        """Updates only the label of the progress dialog."""
         self.log_status(message)
         if self.progress_dialog and self.progress_dialog.isVisible():
-            # Use invokeMethod for thread safety when updating GUI from signal
-             QMetaObject.invokeMethod(self.progress_dialog, "setLabelText", Qt.ConnectionType.QueuedConnection, Q_ARG(str, message))
+            QMetaObject.invokeMethod(self.progress_dialog, "setLabelText", Qt.ConnectionType.QueuedConnection, Q_ARG(str, message))
 
-    def on_analysis_complete(self, pil_image):
-        """Handles successful completion of the GEE analysis."""
-        self.log_status("Analysis thread finished.")
-        if self.progress_dialog:
-            self.progress_dialog.close()
 
+    def on_single_analysis_complete(self, pil_image):
+        self.log_status("Single analysis thread finished.")
+        if self.progress_dialog: self.progress_dialog.close()
         if pil_image:
             try:
-                # Convert PIL Image (likely RGBA from PNG) to QPixmap
                 img_byte_array = io.BytesIO()
-                # Ensure saving as PNG to preserve potential transparency
                 pil_image.save(img_byte_array, format='PNG')
                 img_byte_array.seek(0)
-
                 qimage = QImage.fromData(img_byte_array.read())
-                if qimage.isNull():
-                    self.log_status("ERROR: Failed to load received image data into QImage.")
-                    self.map_label.setText("Error: Could not display map image.")
-                else:
-                    pixmap = QPixmap.fromImage(qimage)
-                    # Scale pixmap to fit the label while maintaining aspect ratio
-                    scaled_pixmap = pixmap.scaled(self.map_label.size(),
-                                                  Qt.AspectRatioMode.KeepAspectRatio,
-                                                  Qt.TransformationMode.SmoothTransformation)
-                    self.map_label.setPixmap(scaled_pixmap)
-                    self.log_status("Map preview displayed.")
-
+                if qimage.isNull(): raise ValueError("QImage is null")
+                pixmap = QPixmap.fromImage(qimage)
+                scaled_pixmap = pixmap.scaled(self.map_label.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                self.map_label.setPixmap(scaled_pixmap)
+                self.log_status("Single analysis map preview displayed.")
             except Exception as e:
-                self.log_status(f"ERROR displaying map image: {e}")
-                tb_str = traceback.format_exc()
-                self.log_status(f"Traceback: {tb_str}")
-                self.map_label.setText("Error displaying map.")
+                self.log_status(f"Error displaying single analysis map: {e}"); self.map_label.setText("Error displaying map.")
         else:
-             # Handle case where worker signaled finished but sent None (e.g., no loss detected, background shown)
-             # Status messages should have been logged by the worker.
-             # Check if map label still shows processing text
-             if "Processing..." in self.map_label.text():
-                  self.map_label.setText("Analysis complete. No significant loss detected\nor map could not be generated.")
+            self.map_label.setText("No significant change or error generating map.")
+        self.analyze_button.setEnabled(True); self.generate_timelapse_button.setEnabled(True)
+
+    def on_single_analysis_error(self, error_message):
+        self.log_status(f"Single Analysis Error: {error_message}")
+        if self.progress_dialog: self.progress_dialog.close()
+        QMessageBox.critical(self, "Single Analysis Error", error_message)
+        self.map_label.setText("Single analysis failed. See Status Log.")
+        self.analyze_button.setEnabled(True); self.generate_timelapse_button.setEnabled(True)
+
+    def cancel_single_analysis(self):
+        self.log_status("Single analysis cancelled by user.")
+        if self.worker: self.worker.is_cancelled = True # Basic cancellation flag
+        self.analyze_button.setEnabled(True); self.generate_timelapse_button.setEnabled(True)
+        self.map_label.setText("Single analysis Cancelled.")
+        if self.progress_dialog: self.progress_dialog.close()
 
 
-        self.analyze_button.setEnabled(True)
-        self.worker_thread = None # Clear thread reference
-        self.worker = None
+    def run_timelapse_generation(self):
+        self.log_status("Starting time-lapse generation...")
+        self.analyze_button.setEnabled(False) # Disable other button too
+        self.generate_timelapse_button.setEnabled(False)
 
-    def on_analysis_error(self, error_message):
-        """Handles errors reported by the GEE worker thread."""
-        self.log_status(f"ERROR during analysis: {error_message}")
-        if self.progress_dialog:
-            self.progress_dialog.close()
-        QMessageBox.critical(self, "Analysis Error", f"An error occurred during analysis:\n{error_message}")
-        self.map_label.setText("Analysis failed. See Status Log.")
-        self.analyze_button.setEnabled(True)
-        self.worker_thread = None
-        self.worker = None
+        try: # Input validation
+            coords_str = self.coord_input.text().strip().split(',')
+            if len(coords_str) != 4: raise ValueError("Coords: 4 numbers.")
+            aoi_coords = [float(c.strip()) for c in coords_str]
+            if not (aoi_coords[0] < aoi_coords[2] and aoi_coords[1] < aoi_coords[3]):
+                 raise ValueError("Coords order: min_lon, min_lat, max_lon, max_lat.")
 
-    def cancel_analysis(self):
-        """Handles user cancellation via the progress dialog."""
-        self.log_status("Analysis cancelled by user.")
-        if self.worker:
-            self.worker.is_cancelled = True # Signal the worker thread to stop early if possible
-        # Note: Thread termination isn't guaranteed immediately.
-        # GEE tasks might continue until they finish or error out.
-        self.analyze_button.setEnabled(True)
-        self.map_label.setText("Analysis Cancelled.")
-        # Progress dialog closes automatically here if autoClose was true,
-        # otherwise, we closed it manually in error/complete slots.
-        if self.progress_dialog:
-             self.progress_dialog.close()
-        self.worker_thread = None # Allow garbage collection
-        self.worker = None
+            baseline_start = self.date1_start.date().toString("yyyy-MM-dd")
+            baseline_end = self.date1_end.date().toString("yyyy-MM-dd")
+            timelapse_start_year = self.timelapse_start_year_input.value()
+            timelapse_end_year = self.timelapse_end_year_input.value()
+            fps = self.timelapse_fps_input.value()
+            threshold = self.threshold_input.value() # Use same threshold
+
+            if self.date1_start.date() >= self.date1_end.date():
+                raise ValueError("Baseline start date must be before baseline end date.")
+            if timelapse_start_year > timelapse_end_year:
+                raise ValueError("Time-lapse start year must be before or same as end year.")
+            if QDate(timelapse_start_year,1,1) <= self.date1_end.date():
+                raise ValueError("Time-lapse start year must be after baseline period ends.")
+
+            # Ask user where to save the video
+            default_video_name = f"galamsey_timelapse_{timelapse_start_year}-{timelapse_end_year}.mp4"
+            save_path, _ = QFileDialog.getSaveFileName(self, "Save Time-Lapse Video", default_video_name, "MP4 Video Files (*.mp4)")
+            if not save_path:
+                self.log_status("Time-lapse save cancelled by user.")
+                self.analyze_button.setEnabled(True); self.generate_timelapse_button.setEnabled(True)
+                return
+
+        except ValueError as ve:
+            self.log_status(f"Input Error: {ve}"); QMessageBox.warning(self, "Input Error", f"{ve}")
+            self.analyze_button.setEnabled(True); self.generate_timelapse_button.setEnabled(True)
+            return
+
+        progress_dialog = self.setup_progress_dialog("Generating Time-Lapse Video...")
+        progress_dialog.setRange(0, timelapse_end_year - timelapse_start_year + 1) # Set range for frames
+        progress_dialog.canceled.connect(self.cancel_timelapse_generation)
+        progress_dialog.show()
+
+        self.timelapse_worker = TimeLapseWorker(
+            aoi_coords, baseline_start, baseline_end,
+            timelapse_start_year, timelapse_end_year, threshold,
+            project_id=self.project_id, output_video_path=save_path, fps=fps
+        )
+        self.timelapse_worker_thread = threading.Thread(target=self.timelapse_worker.run, daemon=True)
+        self.timelapse_worker.signals.finished.connect(self.on_timelapse_complete)
+        self.timelapse_worker.signals.error.connect(self.on_timelapse_error)
+        self.timelapse_worker.signals.progress.connect(self.update_progress_label_only) # Updates label
+        self.timelapse_worker.signals.frame_processed.connect(self.update_timelapse_progress_value) # Updates value
+        self.timelapse_worker_thread.start()
+
+    def update_timelapse_progress_value(self, current_frame, total_frames):
+        """Updates the value of the progress dialog for time-lapse."""
+        if self.progress_dialog and self.progress_dialog.isVisible():
+            # Progress dialog range is set to total_frames. Value is current_frame.
+            self.progress_dialog.setRange(0, total_frames)
+            self.progress_dialog.setValue(current_frame)
+
+
+    def on_timelapse_complete(self, video_path):
+        self.log_status(f"Time-Lapse generation complete! Video saved to: {video_path}")
+        if self.progress_dialog: self.progress_dialog.close()
+        QMessageBox.information(self, "Time-Lapse Complete", f"Video saved to:\n{video_path}")
+        self.analyze_button.setEnabled(True); self.generate_timelapse_button.setEnabled(True)
+
+    def on_timelapse_error(self, error_message):
+        self.log_status(f"Time-Lapse Error: {error_message}")
+        if self.progress_dialog: self.progress_dialog.close()
+        QMessageBox.critical(self, "Time-Lapse Error", error_message)
+        self.analyze_button.setEnabled(True); self.generate_timelapse_button.setEnabled(True)
+
+    def cancel_timelapse_generation(self):
+        self.log_status("Time-Lapse generation cancelled by user.")
+        if self.timelapse_worker: self.timelapse_worker.is_cancelled = True
+        self.analyze_button.setEnabled(True); self.generate_timelapse_button.setEnabled(True)
+        if self.progress_dialog: self.progress_dialog.close()
 
     def closeEvent(self, event):
-        """Handles the main window being closed."""
         if self.worker_thread and self.worker_thread.is_alive():
-             self.log_status("Window closing, attempting to signal cancel to ongoing analysis...")
-             self.cancel_analysis() # Signal cancellation
-             # Give thread a very short time, but don't block exit
-             self.worker_thread.join(timeout=0.2)
-             if self.worker_thread.is_alive():
-                  self.log_status("Warning: Analysis thread may still be running in background.")
+             self.log_status("Window closing, attempting to cancel single analysis...")
+             self.cancel_single_analysis()
+        if self.timelapse_worker_thread and self.timelapse_worker_thread.is_alive():
+             self.log_status("Window closing, attempting to cancel time-lapse...")
+             self.cancel_timelapse_generation()
         event.accept()
-
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
