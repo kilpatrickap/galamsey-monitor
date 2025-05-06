@@ -326,7 +326,7 @@ class GalamseyMonitorApp(QWidget):
         single_analysis_form_layout.addRow(QLabel("NDVI Change Threshold:"), self.threshold_input);
         single_analysis_form_layout.addRow(self.analyze_button)
         single_analysis_group.setLayout(single_analysis_form_layout);
-        # single_analysis_group.setMinimumWidth(350) # Optional: ensure controls don't get too squished
+        single_analysis_group.setMinimumWidth(450) # Optional: ensure controls don't get too squished
 
         map_group = QGroupBox("Interactive Map Preview (Red shows potential vegetation loss)")
         map_v_layout = QVBoxLayout()
