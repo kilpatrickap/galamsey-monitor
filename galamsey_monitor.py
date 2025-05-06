@@ -241,8 +241,8 @@ class GalamseyMonitorApp(QWidget):
         self.coord_input = QLineEdit("-1.795049, 6.335836, -1.745373, 6.365126")
         self.date1_start = QDateEdit(QDate(2020, 1, 1))
         self.date1_end = QDateEdit(QDate(2020, 12, 31))
-        self.date2_start = QDateEdit(QDate(2023, 1, 1)) # Using a past date for Period 2
-        self.date2_end = QDateEdit(QDate(2023, 12, 31)) # Using a past date for Period 2
+        self.date2_start = QDateEdit(QDate(2025, 1, 1)) # Using a past date for Period 2
+        self.date2_end = QDateEdit(QDate(2025, 12, 31)) # Using a past date for Period 2
         self.threshold_input = QDoubleSpinBox()
         self.threshold_input.setRange(-1.0, 0.0)
         self.threshold_input.setSingleStep(0.05)
