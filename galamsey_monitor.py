@@ -59,7 +59,7 @@ class GEEWorker(QObject):
             self.signals.progress.emit("Initializing Earth Engine...")
             try:
                 # Initialize EE within the thread. Replace with your Project ID.
-                ee.Initialize(project='galamsey-monitor')
+                ee.Initialize(project='galamsey-monitor')       #   <<<<<================== todo
             except Exception as init_e:
                 self.signals.error.emit(f"GEE Initialization failed: {init_e}")
                 return
@@ -297,7 +297,7 @@ class GalamseyMonitorApp(QWidget):
         self.log_status("Attempting to initialize Google Earth Engine...")
         try:
             # Initialize GEE on startup. Replace with your Project ID.
-            ee.Initialize(project='galamsey-monitor')
+            ee.Initialize(project='galamsey-monitor')   #   <<<<<===============    todo
             self.log_status("Google Earth Engine initialized successfully.")
         except Exception as e:
             self.log_status(f"ERROR: Failed to initialize GEE on startup: {e}")
