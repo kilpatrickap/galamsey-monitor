@@ -478,11 +478,6 @@ class GalamseyMonitorApp(QWidget):
 
 
 if __name__ == "__main__":
-    # Optional: High DPI scaling attributes (often handled automatically in PyQt6)
-    # If scaling issues occur, consider environment variables like QT_ENABLE_HIGHDPI_SCALING=1
-    # QApplication.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling, True)
-    # QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps, True)
-
     app = QApplication(sys.argv)
     monitor_app = GalamseyMonitorApp()
     monitor_app.show()
