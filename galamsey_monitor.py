@@ -257,6 +257,7 @@ class GalamseyMonitorApp(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Galamsey Monitor with Interactive Map & Time-Lapse")
+
         # Start with a reasonably large default size, user can resize
         self.setGeometry(10, 40, 1300, 900)  # Increased initial size slightly
 
