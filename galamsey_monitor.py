@@ -276,6 +276,12 @@ class GalamseyMonitorApp(QWidget):
         self.media_player = QMediaPlayer()
         self.video_widget = QVideoWidget()
         self.media_player.setVideoOutput(self.video_widget)
+
+        # Set an expanding size policy for the video widget, crucial for layout management
+        self.video_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+
+
         self.play_button = QPushButton();
         self.play_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay));
         self.play_button.setEnabled(False)
@@ -285,6 +291,8 @@ class GalamseyMonitorApp(QWidget):
         self.position_slider.sliderMoved.connect(self.set_video_position_from_slider);
         self.position_slider.setEnabled(False)
         self.year_label_for_slider = QLabel("Year: -")
+
+
         self.media_player.playbackStateChanged.connect(self.media_state_changed);
         self.media_player.positionChanged.connect(self.video_position_changed)
         self.media_player.durationChanged.connect(self.video_duration_changed);
@@ -336,36 +344,62 @@ class GalamseyMonitorApp(QWidget):
         top_h_splitter.addWidget(map_group)
         top_h_splitter.setSizes([380, 800])  # Initial proportional sizes for controls and map
 
-        # --- Time-Lapse and Video Player Section ---
+        # --- Time-Lapse and Video Player Section (MODIFIED LAYOUT) ---
         timelapse_video_group = QGroupBox("Time-Lapse Video")
-        timelapse_video_layout = QVBoxLayout()
-        timelapse_controls_layout = QFormLayout()
-        self.timelapse_start_year_input = QSpinBox();
-        self.timelapse_start_year_input.setRange(2000, QDate.currentDate().year());
-        self.timelapse_start_year_input.setValue(2021)
-        self.timelapse_end_year_input = QSpinBox();
-        self.timelapse_end_year_input.setRange(2000, QDate.currentDate().year() + 5);
-        self.timelapse_end_year_input.setValue(QDate.currentDate().year())
-        self.timelapse_fps_input = QSpinBox();
-        self.timelapse_fps_input.setRange(1, 30);
-        self.timelapse_fps_input.setValue(1)
-        self.generate_timelapse_button = QPushButton("Generate & Load Time-Lapse Video")
-        timelapse_controls_layout.addRow(QLabel("Time-Lapse Start Year:"), self.timelapse_start_year_input);
-        timelapse_controls_layout.addRow(QLabel("Time-Lapse End Year:"), self.timelapse_end_year_input)
-        timelapse_controls_layout.addRow(QLabel("Video FPS:"), self.timelapse_fps_input);
-        timelapse_controls_layout.addRow(self.generate_timelapse_button)
-        timelapse_video_layout.addLayout(timelapse_controls_layout)
+        # Main layout for this groupbox is now Horizontal
+        main_timelapse_h_layout = QHBoxLayout()
 
-        video_player_controls_layout = QHBoxLayout();
-        video_player_controls_layout.addWidget(self.play_button);
-        video_player_controls_layout.addWidget(self.position_slider, 1);  # Slider takes available space
+        # -- Left Panel: Timelapse Controls --
+        timelapse_controls_panel = QWidget()
+        left_v_layout = QVBoxLayout(timelapse_controls_panel)
+        left_v_layout.setContentsMargins(0, 5, 5, 5)  # Adjust margins as needed
+
+        self.timelapse_start_year_input = QSpinBox()
+        self.timelapse_start_year_input.setRange(2000, QDate.currentDate().year())
+        self.timelapse_start_year_input.setValue(2021)
+        self.timelapse_end_year_input = QSpinBox()
+        self.timelapse_end_year_input.setRange(2000, QDate.currentDate().year() + 5)
+        self.timelapse_end_year_input.setValue(QDate.currentDate().year())
+        self.timelapse_fps_input = QSpinBox()
+        self.timelapse_fps_input.setRange(1, 30)
+        self.timelapse_fps_input.setValue(1)
+
+        # Button is initialized here but added to left_v_layout later
+        self.generate_timelapse_button = QPushButton("Generate & Load Time-Lapse Video")
+
+        timelapse_form_inputs_layout = QFormLayout()  # Form for inputs only
+        timelapse_form_inputs_layout.addRow(QLabel("Time-Lapse Start Year:"), self.timelapse_start_year_input)
+        timelapse_form_inputs_layout.addRow(QLabel("Time-Lapse End Year:"), self.timelapse_end_year_input)
+        timelapse_form_inputs_layout.addRow(QLabel("Video FPS:"), self.timelapse_fps_input)
+
+        left_v_layout.addLayout(timelapse_form_inputs_layout)  # Add form to left panel
+        left_v_layout.addWidget(self.generate_timelapse_button)  # Add button below form
+        left_v_layout.addStretch(1)  # Push controls to the top
+
+        timelapse_controls_panel.setMinimumWidth(220)  # Give controls panel a minimum width
+        timelapse_controls_panel.setMaximumWidth(300)  # And a maximum width
+
+        # -- Right Panel: Video Player --
+        video_display_panel = QWidget()
+        right_v_layout = QVBoxLayout(video_display_panel)
+        right_v_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Video player controls (play, slider)
+        video_player_controls_layout = QHBoxLayout()
+        video_player_controls_layout.addWidget(self.play_button)
+        video_player_controls_layout.addWidget(self.position_slider, 1)  # Slider takes available space
         video_player_controls_layout.addWidget(self.year_label_for_slider)
 
-        timelapse_video_layout.addWidget(self.video_widget);
-        self.video_widget.setMinimumHeight(250)  # Ensure video player has a minimum usable height
-        # video_widget's size policy is Expanding by default, good for splitter
-        timelapse_video_layout.addLayout(video_player_controls_layout)
-        timelapse_video_group.setLayout(timelapse_video_layout);
+        right_v_layout.addWidget(self.video_widget, 1)  # Video widget takes most space, stretch factor 1
+        right_v_layout.addLayout(video_player_controls_layout)  # Player controls below video
+
+        self.video_widget.setMinimumHeight(200)  # Minimum height for video player itself
+
+        # Add left and right panels to the main horizontal layout of the groupbox
+        main_timelapse_h_layout.addWidget(timelapse_controls_panel)  # Default stretch factor 0
+        main_timelapse_h_layout.addWidget(video_display_panel, 1)  # Stretch factor 1 (takes more space)
+
+        timelapse_video_group.setLayout(main_timelapse_h_layout)
 
         # --- Status Log Section ---
         status_group = QGroupBox("Status Log")
@@ -383,8 +417,9 @@ class GalamseyMonitorApp(QWidget):
         main_v_splitter.addWidget(top_h_splitter)
         main_v_splitter.addWidget(timelapse_video_group)
         main_v_splitter.addWidget(status_group)
-        # Initial proportional sizes for top section, video section, and log section
-        main_v_splitter.setSizes([500, 300, 100])
+
+        # Adjust initial sizes if needed, e.g., timelapse section might be shorter now
+        main_v_splitter.setSizes([450, 280, 170])  # Example: more for top, bit less for video, more for log
 
         main_layout.addWidget(main_v_splitter)  # Add the main splitter to the window's layout
 
