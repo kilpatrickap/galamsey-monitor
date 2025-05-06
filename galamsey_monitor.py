@@ -259,7 +259,7 @@ class GalamseyMonitorApp(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Galamsey Monitor with Interactive Map & Time-Lapse")
-        self.setGeometry(100, 100, 950, 950)  # Adjusted size
+        self.setGeometry(10, 30, 1200, 800)  # Adjusted size
 
         self.worker_thread = None;
         self.worker = None
@@ -329,7 +329,7 @@ class GalamseyMonitorApp(QWidget):
         self.map_view.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
         self.map_view.setHtml(
             "<html><body style='display:flex;justify-content:center;align-items:center;height:100%;font-family:sans-serif;color:grey;'><p>Map will appear here after analysis.</p></body></html>")
-        self.map_view.setMinimumSize(400, 300)
+        self.map_view.setMinimumSize(500, 300)
         map_v_layout.addWidget(self.map_view)
         map_group.setLayout(map_v_layout)
         top_h_layout.addWidget(map_group, 1)  # Give map view equal space initially
