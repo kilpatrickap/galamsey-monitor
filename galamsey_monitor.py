@@ -242,7 +242,7 @@ class GalamseyMonitorApp(QWidget):
         self.date1_start = QDateEdit(QDate(2020, 1, 1))
         self.date1_end = QDateEdit(QDate(2020, 12, 31))
         self.date2_start = QDateEdit(QDate(2025, 1, 1)) # Using a past date for Period 2
-        self.date2_end = QDateEdit(QDate(2025, 12, 31)) # Using a past date for Period 2
+        self.date2_end = QDateEdit(QDate(2025, 5, 5)) # Using a past date for Period 2
         self.threshold_input = QDoubleSpinBox()
         self.threshold_input.setRange(-1.0, 0.0)
         self.threshold_input.setSingleStep(0.05)
