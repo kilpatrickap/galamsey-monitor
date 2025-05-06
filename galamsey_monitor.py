@@ -320,7 +320,7 @@ class GalamseyMonitorApp(QWidget):
         top_h_layout.addWidget(single_analysis_group, 1)
 
         # Interactive Map Display
-        map_group = QGroupBox("Interactive Map Preview")
+        map_group = QGroupBox("Interactive Map Preview (Red shows potential vegetation loss)")
         map_v_layout = QVBoxLayout()
         self.map_view = QWebEngineView()
         self.map_view.settings().setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
