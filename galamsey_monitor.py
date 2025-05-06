@@ -308,7 +308,7 @@ class GalamseyMonitorApp(QWidget):
         self.coord_input.setToolTip("Enter coordinates as: Lat1, Lon1, Lat2, Lon2 (e.g., 6.3, -1.8, 6.4, -1.7)")
         self.date1_start = QDateEdit(QDate(2020, 1, 1));
         self.date1_end = QDateEdit(QDate(2020, 12, 31))
-        self.date2_start = QDateEdit(QDate(2024, 1, 1));
+        self.date2_start = QDateEdit(QDate(2025, 1, 1));
         self.date2_end = QDateEdit(QDate(QDate.currentDate()))
         self.threshold_input = QDoubleSpinBox();
         self.threshold_input.setRange(-1.0, 0.0);
