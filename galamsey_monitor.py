@@ -358,7 +358,7 @@ class GalamseyMonitorApp(QWidget):
         self.timelapse_end_year_input.setValue(QDate.currentDate().year())
         self.timelapse_fps_input = QSpinBox()
         self.timelapse_fps_input.setRange(1, 30)
-        self.timelapse_fps_input.setValue(2)
+        self.timelapse_fps_input.setValue(1)
         self.generate_timelapse_button = QPushButton("Generate & Load Time-Lapse Video")
         timelapse_controls_layout.addRow(QLabel("Time-Lapse Start Year:"), self.timelapse_start_year_input)
         timelapse_controls_layout.addRow(QLabel("Time-Lapse End Year:"), self.timelapse_end_year_input)
