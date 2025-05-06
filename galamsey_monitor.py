@@ -48,7 +48,7 @@ def process_single_gee_frame(aoi_rectangle_coords, period1_start, period1_end,
     # GEE should be initialized by the worker's run method or globally.
     # No ee.Initialize() here to avoid conflicts if already initialized.
 
-    aoi = ee.Geometry.Rectangle(aoi_rectangle_coords)
+    aoi = ee.Geometry.Rectangle(aoi_rectangle_coords)  # Expects [minLon, minLat, maxLon, maxLat]
 
     def calculate_ndvi(image):
         return image.normalizedDifference(['B8', 'B4']).rename('NDVI')
@@ -122,7 +122,7 @@ class GEEWorker(QObject):
                  project_id='galamsey-monitor'):
         super().__init__()
         self.signals = WorkerSignals()
-        self.aoi_rectangle_coords = aoi_rectangle_coords
+        self.aoi_rectangle_coords = aoi_rectangle_coords  # Expects [minLon, minLat, maxLon, maxLat]
         self.start1, self.end1 = start1, end1
         self.start2, self.end2 = start2, end2
         self.threshold, self.thumb_size = threshold, thumb_size
@@ -142,7 +142,7 @@ class GEEWorker(QObject):
                                                  self.threshold, self.thumb_size, self.project_id,
                                                  self.signals.progress.emit)
             if self.is_cancelled:  # Check before emitting finished
-                self.signals.error.emit("Single analysis was cancelled during processing.")  # Or a different signal
+                self.signals.error.emit("Single analysis was cancelled during processing.")
                 return
             self.signals.finished.emit(pil_image)
         except Exception as e:
@@ -157,7 +157,7 @@ class TimeLapseWorker(QObject):
                  output_video_path="galamsey_timelapse.mp4", fps=1):
         super().__init__()
         self.signals = WorkerSignals()
-        self.aoi_rectangle_coords = aoi_rectangle_coords
+        self.aoi_rectangle_coords = aoi_rectangle_coords  # Expects [minLon, minLat, maxLon, maxLat]
         self.baseline_start_date, self.baseline_end_date = baseline_start_date, baseline_end_date
         self.timelapse_start_year, self.timelapse_end_year = timelapse_start_year, timelapse_end_year
         self.threshold, self.thumb_size = threshold, thumb_size
@@ -310,8 +310,9 @@ class GalamseyMonitorApp(QWidget):
 
         single_analysis_group = QGroupBox("Single Period Analysis")
         single_analysis_form_layout = QFormLayout()
-        self.coord_input = QLineEdit("-1.795049, 6.335836, -1.745373, 6.365126")
-        self.coord_input.setToolTip("Enter coordinates as: Lon1, Lat1, Lon2, Lat2 (e.g., -1.8, 6.3, -1.7, 6.4)")
+        # Default coordinates: Lat1, Lon1, Lat2, Lon2
+        self.coord_input = QLineEdit("6.335836, -1.795049, 6.365126, -1.745373")
+        self.coord_input.setToolTip("Enter coordinates as: Lat1, Lon1, Lat2, Lon2 (e.g., 6.3, -1.8, 6.4, -1.7)")
         self.date1_start = QDateEdit(QDate(2020, 1, 1));
         self.date1_end = QDateEdit(QDate(2020, 12, 31))
         self.date2_start = QDateEdit(QDate(2024, 1, 1));
@@ -324,7 +325,8 @@ class GalamseyMonitorApp(QWidget):
         for dt_edit in [self.date1_start, self.date1_end, self.date2_start, self.date2_end]:
             dt_edit.setCalendarPopup(True);
             dt_edit.setDisplayFormat("dd-MM-yyyy")
-        single_analysis_form_layout.addRow(QLabel("AOI Coords (Lon1, Lat1, Lon2, Lat2):"), self.coord_input)
+        # Label reflects Lat, Lon order
+        single_analysis_form_layout.addRow(QLabel("AOI Coords (Lat1, Lon1, Lat2, Lon2):"), self.coord_input)
         single_analysis_form_layout.addRow(QLabel("Period 1 Start (Baseline):"), self.date1_start)
         single_analysis_form_layout.addRow(QLabel("Period 1 End (Baseline):"), self.date1_end)
         single_analysis_form_layout.addRow(QLabel("Period 2 Start (Comparison):"), self.date2_start)
@@ -407,7 +409,8 @@ class GalamseyMonitorApp(QWidget):
         self.generate_timelapse_button.setEnabled(False)
 
     def log_status(self, message):
-        self.status_log.append(message); QApplication.processEvents()
+        self.status_log.append(message);
+        QApplication.processEvents()
 
     def setup_progress_dialog(self, title="Processing..."):
         if self.progress_dialog and self.progress_dialog.isVisible(): self.progress_dialog.close()
@@ -421,16 +424,29 @@ class GalamseyMonitorApp(QWidget):
 
     def _parse_coordinates(self):
         coords_str_list = self.coord_input.text().strip().split(',')
-        if len(coords_str_list) != 4: raise ValueError("Coords: 4 numbers (Lon1,Lat1,Lon2,Lat2) separated by commas.")
+        if len(coords_str_list) != 4:
+            # Updated error message
+            raise ValueError("Coords: 4 numbers (Lat1,Lon1,Lat2,Lon2) separated by commas.")
         try:
             raw_coords_float = [float(c.strip()) for c in coords_str_list]
         except ValueError:
             raise ValueError("Invalid coordinate number format.")
-        lon1, lat1, lon2, lat2 = raw_coords_float
-        if not (-180 <= lon1 <= 180 and -180 <= lon2 <= 180): raise ValueError(
-            "Longitudes must be between -180 and 180.")
-        if not (-90 <= lat1 <= 90 and -90 <= lat2 <= 90): raise ValueError("Latitudes must be between -90 and 90.")
+
+        # Unpack according to Lat, Lon, Lat, Lon order
+        lat1, lon1, lat2, lon2 = raw_coords_float
+
+        # Validate latitudes
+        if not (-90 <= lat1 <= 90 and -90 <= lat2 <= 90):
+            raise ValueError("Latitudes must be between -90 and 90.")
+        # Validate longitudes
+        if not (-180 <= lon1 <= 180 and -180 <= lon2 <= 180):
+            raise ValueError("Longitudes must be between -180 and 180.")
+
+        # GEE ee.Geometry.Rectangle expects [xMin, yMin, xMax, yMax]
+        # which is [minLon, minLat, maxLon, maxLat]
         aoi_ee_rect_coords = [min(lon1, lon2), min(lat1, lat2), max(lon1, lon2), max(lat1, lat2)]
+
+        # raw_coords_float is already in Lat1,Lon1,Lat2,Lon2 order for filename
         return raw_coords_float, aoi_ee_rect_coords
 
     def run_single_analysis(self):
@@ -440,7 +456,8 @@ class GalamseyMonitorApp(QWidget):
         self.map_label.setText("Processing...");
         self.map_label.setPixmap(QPixmap())
         try:
-            _, aoi_ee_rect_coords = self._parse_coordinates()  # raw_coords not needed here
+            # _parse_coordinates now returns raw_coords_input (Lat1,Lon1,Lat2,Lon2) and aoi_ee_rect_coords ([minLon,minLat,maxLon,maxLat])
+            _, aoi_ee_rect_coords = self._parse_coordinates()
             start1 = self.date1_start.date().toString("yyyy-MM-dd");
             end1 = self.date1_end.date().toString("yyyy-MM-dd")
             start2 = self.date2_start.date().toString("yyyy-MM-dd");
@@ -485,9 +502,11 @@ class GalamseyMonitorApp(QWidget):
                                                      Qt.TransformationMode.SmoothTransformation))
                 self.log_status("Map preview updated.")
             except Exception as e:
-                self.log_status(f"Error display map: {e}"); self.map_label.setText("Error display map.")
+                self.log_status(f"Error display map: {e}");
+                self.map_label.setText("Error display map.")
         else:
-            self.map_label.setText("No significant change or no data."); self.log_status("Single analysis: No image.")
+            self.map_label.setText("No significant change or no data.");
+            self.log_status("Single analysis: No image.")
         self.analyze_button.setEnabled(True);
         self.generate_timelapse_button.setEnabled(True)
 
@@ -516,6 +535,7 @@ class GalamseyMonitorApp(QWidget):
         self.active_timelapse_fps = None;
         self._update_year_label_for_slider(0)
         try:
+            # raw_coords_input is now in Lat1,Lon1,Lat2,Lon2 order
             raw_coords_input, aoi_ee_rect_coords = self._parse_coordinates()
             baseline_start = self.date1_start.date().toString("yyyy-MM-dd");
             baseline_end = self.date1_end.date().toString("yyyy-MM-dd")
@@ -526,6 +546,7 @@ class GalamseyMonitorApp(QWidget):
             if QDate(tl_start_year, 1, 1) <= self.date1_end.date(): raise ValueError(
                 "Timelapse start must be after baseline end.")
 
+            # Filename will use raw_coords_input (Lat1,Lon1,Lat2,Lon2)
             coord_fn_parts = [str(c).replace('.', 'p').replace('-', 'm') for c in raw_coords_input]
             video_filename = f"{'_'.join(coord_fn_parts)}_{tl_start_year}-{tl_end_year}_timelapse.mp4"
             videos_dir = os.path.join(os.getcwd(), "videos");
@@ -597,9 +618,11 @@ class GalamseyMonitorApp(QWidget):
     def play_video(self):
         if self.media_player.source().isEmpty(): self.log_status("No video loaded."); return
         if self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
-            self.media_player.pause(); self.log_status("Video paused.")
+            self.media_player.pause();
+            self.log_status("Video paused.")
         else:
-            self.media_player.play(); self.log_status("Video playing.")
+            self.media_player.play();
+            self.log_status("Video playing.")
 
     def media_state_changed(self, state: QMediaPlayer.PlaybackState):
         self.play_button.setIcon(self.style().standardIcon(
@@ -619,7 +642,8 @@ class GalamseyMonitorApp(QWidget):
             self.year_label_for_slider.setText("Year: -")
 
     def video_position_changed(self, position_ms):
-        self.position_slider.setValue(position_ms); self._update_year_label_for_slider(position_ms)
+        self.position_slider.setValue(position_ms);
+        self._update_year_label_for_slider(position_ms)
 
     def video_duration_changed(self, duration_ms):
         self.position_slider.setRange(0, duration_ms)
@@ -632,7 +656,8 @@ class GalamseyMonitorApp(QWidget):
             self.position_slider.setEnabled(False)
 
     def set_video_position_from_slider(self, position_ms):
-        self.media_player.setPosition(position_ms); self._update_year_label_for_slider(position_ms)
+        self.media_player.setPosition(position_ms);
+        self._update_year_label_for_slider(position_ms)
 
     def handle_media_player_error(self):
         self.play_button.setEnabled(False);
