@@ -291,11 +291,11 @@ class GalamseyMonitorApp(QWidget):
         single_analysis_layout = QVBoxLayout()
         input_form_layout = QFormLayout()
 
-        self.coord_input = QLineEdit("-1.933843, 6.242898, -1.794923, 6.307095") # Corrected example
+        self.coord_input = QLineEdit("-1.795049, 6.335836, -1.745373, 6.365126") # Corrected example
         self.date1_start = QDateEdit(QDate(2017, 1, 1)) # Baseline year
         self.date1_end = QDateEdit(QDate(2017, 12, 31))
-        self.date2_start = QDateEdit(QDate(2019, 1, 1)) # Example comparison year
-        self.date2_end = QDateEdit(QDate(2019, 12, 31))
+        self.date2_start = QDateEdit(QDate(2025, 1, 1)) # Example comparison year
+        self.date2_end = QDateEdit(QDate(2025, 5, 5))
         self.threshold_input = QDoubleSpinBox()
         self.threshold_input.setRange(-1.0, 0.0); self.threshold_input.setSingleStep(0.05); self.threshold_input.setValue(-0.20)
         self.analyze_button = QPushButton("Analyze Single Period")
