@@ -505,7 +505,8 @@ class GalamseyMonitorApp(QWidget):
                 name='GEE Analysis Layer',
                 overlay=True,  # This is an overlay
                 control=True,
-                show=True  # Show GEE layer by default
+                show=True,  # Show GEE layer by default
+                max_native_zoom = 17  # <--- ADDED THIS LINE (Experiment with 16, 17, or 18)
             ).add_to(folium_map)
 
             folium.LayerControl().add_to(folium_map)  # Add layer control
