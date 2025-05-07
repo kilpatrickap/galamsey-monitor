@@ -256,7 +256,7 @@ class TimeLapseWorker(QObject):
 class GalamseyMonitorApp(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Galamsey Monitor with Interactive Map & Time-Lapse")
+        self.setWindowTitle("Galamsey Monitor")
 
         # Start with a reasonably large default size, user can resize
         self.setGeometry(10, 40, 1400, 750)  # Increased initial size slightly
