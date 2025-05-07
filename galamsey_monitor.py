@@ -5,12 +5,12 @@ import traceback
 import os
 import tempfile
 import glob
-# import re # Not strictly needed if using the split/filter/join method for sanitization
 
 import ee
 import requests
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont  # Added ImageDraw, ImageFont
 import cv2
+import numpy as np  # Added numpy
 import folium
 
 from PyQt6.QtWidgets import (
@@ -144,7 +144,7 @@ class GEEWorker(QObject):
         try:
             ee.Initialize(project=self.project_id)
         except Exception:
-            pass
+            pass  # Initialization might have happened already
 
         try:
             analysis_data = process_single_gee_frame(
@@ -165,92 +165,216 @@ class GEEWorker(QObject):
             self.signals.error.emit(f"Error in GEEWorker (map_id): {e}\nTrace: {tb_str}")
 
 
-# --- Time-Lapse Generation Worker ---
+# --- Time-Lapse Generation Worker (with Overlays) ---
 class TimeLapseWorker(QObject):
     def __init__(self, aoi_rectangle_coords, baseline_start_date, baseline_end_date, timelapse_start_year,
                  timelapse_end_year, threshold, thumb_size=512, project_id='galamsey-monitor',
-                 output_video_path="galamsey_timelapse.mp4", fps=1):
+                 output_video_path="galamsey_timelapse.mp4", fps=1,
+                 aoi_name="Default AOI", raw_input_coords=None):
         super().__init__()
         self.signals = WorkerSignals()
         self.aoi_rectangle_coords = aoi_rectangle_coords
         self.baseline_start_date, self.baseline_end_date = baseline_start_date, baseline_end_date
         self.timelapse_start_year, self.timelapse_end_year = timelapse_start_year, timelapse_end_year
-        self.threshold, self.thumb_size = threshold, thumb_size
+        self.threshold = threshold
+        self.thumb_size = thumb_size  # This is the GEE image content size
         self.project_id = project_id
         self.output_video_path = output_video_path
         self.fps = fps
         self.is_cancelled = False
+        self.aoi_name = aoi_name
+        self.raw_input_coords = raw_input_coords if raw_input_coords else [0.0, 0.0, 0.0,
+                                                                           0.0]  # GUI: Lat1,Lon1,Lat2,Lon2
 
     def run(self):
         try:
             ee.Initialize(project=self.project_id)
         except Exception:
-            pass
+            pass  # Initialization might have happened already
 
-        temp_frames_dir = tempfile.mkdtemp(prefix="galamsey_frames_")
-        self.signals.progress.emit(f"Temporary frames will be stored in: {temp_frames_dir}")
-        frame_paths = []
+        # --- Border and Text Definitions ---
+        top_border_height = 40
+        bottom_border_height = 70
+        left_border_width = 230
+        right_border_width = 20  # Minimal right border, text is mostly on left/bottom
+        text_color = (255, 255, 255)  # White
+        border_bg_color = (0, 0, 0)  # Black
+
+        try:
+            font_path = "arial.ttf"  # Ensure this font is accessible or provide a full path
+            # Or try a more generic name if arial.ttf is not standard on all target systems
+            # font_path = "LiberationSans-Regular.ttf" # Example for Linux
+            font_title = ImageFont.truetype(font_path, 22)
+            font_coords_header = ImageFont.truetype(font_path, 15)
+            font_coords_value = ImageFont.truetype(font_path, 14)
+            font_bottom_info = ImageFont.truetype(font_path, 11)
+            font_year = ImageFont.truetype(font_path, 16)
+        except IOError:
+            self.signals.progress.emit(
+                f"Warning: Font '{font_path}' not found. Using default PIL font. Text quality may be lower.")
+            font_title = ImageFont.load_default()
+            font_coords_header = ImageFont.load_default()
+            font_coords_value = ImageFont.load_default()
+            font_bottom_info = ImageFont.load_default()
+            font_year = ImageFont.load_default()
+
+        content_width = self.thumb_size
+        content_height = self.thumb_size
+
+        bordered_frame_width = content_width + left_border_width + right_border_width
+        bordered_frame_height = content_height + top_border_height + bottom_border_height
+        video_frame_size = (bordered_frame_width, bordered_frame_height)
+
+        video_writer_initialized = False
+        out_video = None
         total_frames_to_generate = self.timelapse_end_year - self.timelapse_start_year + 1
+        if total_frames_to_generate <= 0:
+            self.signals.error.emit("No frames requested for timelapse (start year not before end year).")
+            return
+
         try:
             for i, year in enumerate(range(self.timelapse_start_year, self.timelapse_end_year + 1)):
                 if self.is_cancelled:
                     self.signals.progress.emit("Time-lapse generation cancelled by user.")
                     break
                 self.signals.frame_processed.emit(i + 1, total_frames_to_generate)
-                self.signals.progress.emit(f"Processing frame for year: {year} ({i + 1}/{total_frames_to_generate})")
-                try:
-                    pil_image = process_single_gee_frame(
-                        self.aoi_rectangle_coords, self.baseline_start_date, self.baseline_end_date,
-                        f"{year}-01-01", f"{year}-12-31", self.threshold,
-                        self.thumb_size, self.project_id, self.signals.progress.emit,
-                        output_type='image'
-                    )
-                    if pil_image:
-                        if pil_image.mode == 'RGBA': pil_image = pil_image.convert('RGB')
-                        frame_filename = os.path.join(temp_frames_dir, f"frame_{i:04d}.png")
-                        pil_image.save(frame_filename);
-                        frame_paths.append(frame_filename)
-                        self.signals.progress.emit(f"Saved temporary frame for {year}: {frame_filename}")
-                    else:
-                        self.signals.progress.emit(f"Skipping frame for year {year} (no image data).")
-                except Exception as frame_e:
-                    self.signals.progress.emit(f"Error for year {year}: {frame_e}. Skipping.")
+                self.signals.progress.emit(f"Processing GEE data for year: {year} ({i + 1}/{total_frames_to_generate})")
 
-            if self.is_cancelled: self.signals.error.emit("Video compilation cancelled."); return
-            if not frame_paths: self.signals.error.emit("No frames generated for video."); return
-            self.signals.progress.emit("Compiling video...");
-            video_output_dir = os.path.dirname(self.output_video_path)
-            if video_output_dir: os.makedirs(video_output_dir, exist_ok=True)
-            first_frame_img = cv2.imread(frame_paths[0])
-            if first_frame_img is None: self.signals.error.emit(f"Could not read first frame: {frame_paths[0]}"); return
-            height, width, _ = first_frame_img.shape;
-            video_size = (width, height)
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v');
-            out_video = cv2.VideoWriter(self.output_video_path, fourcc, self.fps, video_size)
-            for frame_path in sorted(frame_paths):
-                img = cv2.imread(frame_path)
-                if img is not None:
-                    out_video.write(img)
+                gee_pil_image = process_single_gee_frame(
+                    self.aoi_rectangle_coords, self.baseline_start_date, self.baseline_end_date,
+                    f"{year}-01-01", f"{year}-12-31", self.threshold,
+                    self.thumb_size, self.project_id, self.signals.progress.emit,
+                    output_type='image'
+                )
+
+                current_frame_pil = Image.new('RGB', video_frame_size, border_bg_color)
+                draw = ImageDraw.Draw(current_frame_pil)
+
+                if gee_pil_image:
+                    if gee_pil_image.mode == 'RGBA':
+                        gee_pil_image = gee_pil_image.convert('RGB')
+                    current_frame_pil.paste(gee_pil_image, (left_border_width, top_border_height))
                 else:
-                    self.signals.progress.emit(f"Warning: Could not read {frame_path} for video.")
-            out_video.release();
-            self.signals.progress.emit(f"Video complete: {self.output_video_path}")
-            self.signals.finished.emit(self.output_video_path)
-        except Exception as e:
-            tb_str = traceback.format_exc();
-            self.signals.error.emit(f"Time-lapse error: {e}\nTrace: {tb_str}")
-        finally:
-            self.signals.progress.emit("Cleaning up temp frames...")
-            for fp in frame_paths:
+                    self.signals.progress.emit(f"No GEE image for {year}. Drawing 'NO DATA'.")
+                    no_data_text = f"NO DATA FOR {year}"
+                    try:
+                        text_w, text_h = draw.textbbox((0, 0), no_data_text, font=font_title)[2:4]  # PIL 9.2.0+
+                    except AttributeError:
+                        text_w, text_h = draw.textsize(no_data_text, font=font_title)  # Older PIL
+                    draw.text(
+                        (left_border_width + (content_width - text_w) / 2,
+                         top_border_height + (content_height - text_h) / 2),
+                        no_data_text, font=font_title, fill=text_color
+                    )
+
+                # Top Border: AOI Name
+                aoi_text_content = self.aoi_name
                 try:
-                    os.remove(fp)
-                except OSError:
-                    pass
-            try:
-                if os.path.exists(temp_frames_dir): os.rmdir(temp_frames_dir); self.signals.progress.emit(
-                    "Temp frames dir removed.")
-            except OSError:
-                self.signals.progress.emit(f"Could not remove temp frames dir: {temp_frames_dir}.")
+                    text_w_title, text_h_title = draw.textbbox((0, 0), aoi_text_content, font=font_title)[2:4]
+                except AttributeError:
+                    text_w_title, text_h_title = draw.textsize(aoi_text_content, font=font_title)
+                draw.text(
+                    ((bordered_frame_width - text_w_title) / 2, (top_border_height - text_h_title) / 2),
+                    aoi_text_content, font=font_title, fill=text_color
+                )
+
+                # Left Border: Coordinates
+                coord_text_x_margin = 10
+                coord_text_y_start = top_border_height + 15
+                current_y = coord_text_y_start
+                line_spacing_s = 3  # Small space after value
+                line_spacing_l = 10  # Larger space after header or group
+
+                # Helper to get text height robustly
+                def get_text_height(text_sample, font_obj):
+                    try:
+                        return font_obj.getbbox(text_sample)[3] - font_obj.getbbox(text_sample)[1]
+                    except AttributeError:
+                        return font_obj.getsize(text_sample)[1]
+
+                left_texts_config = [
+                    ("Top-left-corner:", font_coords_header, line_spacing_s),
+                    (f"  Lat 1: {self.raw_input_coords[0]:.6f}", font_coords_value, line_spacing_s),
+                    (f"  Lon 1: {self.raw_input_coords[1]:.6f}", font_coords_value, line_spacing_l),
+                    # Larger space after Lon1
+                    ("Bottom-right-corner:", font_coords_header, line_spacing_s),
+                    (f"  Lat 2: {self.raw_input_coords[2]:.6f}", font_coords_value, line_spacing_s),
+                    (f"  Lon 2: {self.raw_input_coords[3]:.6f}", font_coords_value, line_spacing_s),
+                ]
+                for text, font_type, spacing_after in left_texts_config:
+                    draw.text((coord_text_x_margin, current_y), text, font=font_type, fill=text_color)
+                    current_y += get_text_height("Ay", font_type) + spacing_after
+
+                # Bottom Border
+                bottom_content_y_start = bordered_frame_height - bottom_border_height + 10
+                try:
+                    _, lh_bottom_info = font_bottom_info.getbbox("A")[3], font_bottom_info.getbbox("A")[1]
+                except AttributeError:
+                    lh_bottom_info = font_bottom_info.getsize("A")[1]
+
+                loss_text = "Red shows potential Vegetative Loss"
+                draw.text((left_border_width + 10, bottom_content_y_start), loss_text, font=font_bottom_info,
+                          fill=text_color)
+
+                year_text_content = f"YEAR: {year}"
+                try:
+                    year_text_w, year_text_h = draw.textbbox((0, 0), year_text_content, font=font_year)[2:4]
+                except AttributeError:
+                    year_text_w, year_text_h = draw.textsize(year_text_content, font=font_year)
+                # Align year text vertically with loss_text
+                year_text_y_offset = (lh_bottom_info - year_text_h) / 2
+                draw.text(
+                    (bordered_frame_width - right_border_width - year_text_w - 10,
+                     bottom_content_y_start + year_text_y_offset),
+                    year_text_content, font=font_year, fill=text_color
+                )
+
+                second_line_y = bottom_content_y_start + lh_bottom_info + 8
+
+                copyright_text = "Copyright Killted Ent 2025"
+                draw.text((left_border_width + 10, second_line_y), copyright_text, font=font_bottom_info,
+                          fill=text_color)
+
+                rights_text = "All rights reserved."
+                try:
+                    rights_text_w, _ = draw.textbbox((0, 0), rights_text, font=font_bottom_info)[2:4]
+                except AttributeError:
+                    rights_text_w, _ = draw.textsize(rights_text, font=font_bottom_info)
+                draw.text(
+                    (bordered_frame_width - right_border_width - rights_text_w - 10, second_line_y),
+                    rights_text, font=font_bottom_info, fill=text_color
+                )
+
+                frame_cv = cv2.cvtColor(np.array(current_frame_pil), cv2.COLOR_RGB2BGR)
+
+                if not video_writer_initialized:
+                    self.signals.progress.emit("Initializing video writer...")
+                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                    video_output_dir = os.path.dirname(self.output_video_path)
+                    if video_output_dir and not os.path.exists(video_output_dir):
+                        os.makedirs(video_output_dir, exist_ok=True)
+                    out_video = cv2.VideoWriter(self.output_video_path, fourcc, self.fps, video_frame_size)
+                    if not out_video.isOpened():
+                        self.signals.error.emit(f"FATAL: Could not open video writer for {self.output_video_path}.")
+                        return
+                    video_writer_initialized = True
+
+                out_video.write(frame_cv)
+                self.signals.progress.emit(f"Added frame for {year} to video.")
+
+            if video_writer_initialized and out_video:
+                self.signals.progress.emit("Finalizing video...")
+                out_video.release()
+                self.signals.progress.emit(f"Video compilation complete: {self.output_video_path}")
+                self.signals.finished.emit(self.output_video_path)
+            elif not video_writer_initialized and total_frames_to_generate > 0:
+                self.signals.error.emit("No valid frames were processed to create the video.")
+
+        except Exception as e:
+            tb_str = traceback.format_exc()
+            self.signals.error.emit(f"Time-lapse overlay/compilation error: {e}\nTrace: {tb_str}")
+            if video_writer_initialized and out_video:
+                out_video.release()
 
 
 # --- Main Application Window ---
@@ -258,13 +382,13 @@ class GalamseyMonitorApp(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Galamsey Monitor")
-        self.setGeometry(10, 40, 1400, 750)
+        self.setGeometry(10, 40, 1400, 750)  # Adjusted for typical screen
         self.worker_thread = None;
         self.worker = None
         self.timelapse_worker_thread = None;
         self.timelapse_worker = None
         self.progress_dialog = None
-        self.project_id = 'galamsey-monitor'
+        self.project_id = 'galamsey-monitor'  # Replace with your GEE Project ID if different
         self.map_html_temp_dir = None
         self.active_timelapse_start_year = None;
         self.active_timelapse_end_year = None;
@@ -292,7 +416,7 @@ class GalamseyMonitorApp(QWidget):
         single_analysis_form_layout = QFormLayout()
         self.aoi_name_label = QLabel("AOI:");
         self.aoi_name_input = QLineEdit();
-        self.aoi_name_input.setPlaceholderText("Anyinam");
+        self.aoi_name_input.setPlaceholderText("e.g. Anyinam");
         self.aoi_name_input.setToolTip("Enter a descriptive name for this Area of Interest (Mandatory for Video).")
         single_analysis_form_layout.addRow(self.aoi_name_label, self.aoi_name_input)
         self.coord_input = QLineEdit("6.401452, -0.594587, 6.355603, -0.496084");
@@ -316,7 +440,7 @@ class GalamseyMonitorApp(QWidget):
         single_analysis_form_layout.addRow(QLabel("NDVI Change Threshold:"), self.threshold_input);
         single_analysis_form_layout.addRow(self.analyze_button)
         single_analysis_group.setLayout(single_analysis_form_layout);
-        single_analysis_group.setMinimumWidth(450)
+        single_analysis_group.setMinimumWidth(450)  # Increased min width
         map_group = QGroupBox("Interactive Map Preview (Red shows potential vegetation loss)");
         map_v_layout = QVBoxLayout()
         self.map_view = QWebEngineView();
@@ -331,7 +455,7 @@ class GalamseyMonitorApp(QWidget):
         top_h_splitter = QSplitter(Qt.Orientation.Horizontal);
         top_h_splitter.addWidget(single_analysis_group);
         top_h_splitter.addWidget(map_group);
-        top_h_splitter.setSizes([380, 800])
+        top_h_splitter.setSizes([400, 700])  # Adjusted initial split
         timelapse_video_group = QGroupBox("Time-Lapse Video");
         main_timelapse_h_layout = QHBoxLayout()
         timelapse_controls_panel = QWidget();
@@ -355,7 +479,7 @@ class GalamseyMonitorApp(QWidget):
         left_v_layout.addWidget(self.generate_timelapse_button);
         left_v_layout.addStretch(1)
         timelapse_controls_panel.setMinimumWidth(220);
-        timelapse_controls_panel.setMaximumWidth(300)
+        timelapse_controls_panel.setMaximumWidth(300)  # Adjusted for tighter layout
         video_display_panel = QWidget();
         right_v_layout = QVBoxLayout(video_display_panel);
         right_v_layout.setContentsMargins(0, 0, 0, 0)
@@ -381,205 +505,251 @@ class GalamseyMonitorApp(QWidget):
         main_v_splitter.addWidget(top_h_splitter);
         main_v_splitter.addWidget(timelapse_video_group);
         main_v_splitter.addWidget(status_group);
-        main_v_splitter.setSizes([450, 280, 170])
+        main_v_splitter.setSizes([450, 280, 120])  # Adjusted log height
         main_layout.addWidget(main_v_splitter)
         self.analyze_button.clicked.connect(self.run_single_analysis);
         self.generate_timelapse_button.clicked.connect(self.run_timelapse_generation)
         self.init_gee_check()
 
     def init_gee_check(self):
-        self.log_status("Attempting GEE init...");
+        self.log_status("Attempting GEE initialization...");
         try:
             ee.Initialize(project=self.project_id);
-            self.log_status(f"GEE init OK (Project: {self.project_id}).");
-            ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED').limit(1).size().getInfo();
-            self.log_status("GEE test OK.")
+            self.log_status(f"GEE initialized successfully (Project: {self.project_id}).");
+            # Perform a simple GEE operation to confirm connectivity and permissions
+            ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED').limit(
+                1).size().getInfo();  # SR_HARMONIZED is generally available
+            self.log_status("GEE test query successful.")
         except Exception as e:
             self.handle_gee_init_error(e)
 
     def handle_gee_init_error(self, e):
-        msg = (f"ERROR GEE Init: {e}\n\nEnsure:\n1. 'earthengine authenticate' run.\n2. Internet.\n"
-               f"3. Project ID ('{self.project_id}') correct & API enabled.\n4. Restart app after checks.")
-        self.log_status(msg.replace("\n\n", "\n").replace("\n", "\nStatus: "));
-        QMessageBox.critical(self, "GEE Init Error", msg)
+        msg = (f"GEE Initialization Error: {e}\n\n"
+               "Please ensure:\n"
+               "1. You have run 'earthengine authenticate' in your terminal and authenticated successfully.\n"
+               "2. You have an active internet connection.\n"
+               f"3. The GEE Project ID ('{self.project_id}') is correct and the Earth Engine API is enabled for this project in Google Cloud Console.\n"
+               "4. You have the necessary permissions for the specified GEE project.\n\n"
+               "Please restart the application after verifying these points.")
+        self.log_status(msg.replace("\n\n", "\n").replace("\n", "\nStatus: "));  # Log concise status
+        QMessageBox.critical(self, "GEE Initialization Error", msg)
         self.analyze_button.setEnabled(False);
         self.generate_timelapse_button.setEnabled(False)
 
     def log_status(self, message):
-        self.status_log.append(message); QApplication.processEvents()
+        self.status_log.append(message);
+        QApplication.processEvents()  # Ensure GUI updates
 
     def setup_progress_dialog(self, title="Processing..."):
         if self.progress_dialog and self.progress_dialog.isVisible(): self.progress_dialog.close()
         self.progress_dialog = QProgressDialog(title, "Cancel", 0, 100, self);
         self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal);
-        self.progress_dialog.setAutoClose(False);
-        self.progress_dialog.setAutoReset(False);
-        self.progress_dialog.setMinimumDuration(0);
+        self.progress_dialog.setAutoClose(False);  # We control closing
+        self.progress_dialog.setAutoReset(False)  # We control reset
+        self.progress_dialog.setMinimumDuration(0);  # Show immediately
         self.progress_dialog.setValue(0);
         return self.progress_dialog
 
     def _parse_coordinates(self):
         coords_str_list = self.coord_input.text().strip().split(',')
-        if len(coords_str_list) != 4: raise ValueError("Coords: 4 numbers (Lat1,Lon1,Lat2,Lon2) comma-separated.")
+        if len(coords_str_list) != 4:
+            raise ValueError("Coordinate input requires 4 numbers (Lat1, Lon1, Lat2, Lon2) separated by commas.")
         try:
+            # These are the coordinates as entered by the user: [Lat1_gui, Lon1_gui, Lat2_gui, Lon2_gui]
             raw_coords_float = [float(c.strip()) for c in coords_str_list]
         except ValueError:
-            raise ValueError("Invalid coordinate number format.")
+            raise ValueError("Invalid number format in coordinates.")
+
         lat1, lon1, lat2, lon2 = raw_coords_float
-        if not (-90 <= lat1 <= 90 and -90 <= lat2 <= 90): raise ValueError("Latitudes must be -90 to 90.")
-        if not (-180 <= lon1 <= 180 and -180 <= lon2 <= 180): raise ValueError("Longitudes must be -180 to 180.")
-        aoi_ee_rect_coords = [min(lon1, lon2), min(lat1, lat2), max(lon1, lon2), max(lat1, lat2)];
+        if not (-90 <= lat1 <= 90 and -90 <= lat2 <= 90):
+            raise ValueError("Latitudes must be between -90 and 90.")
+        if not (-180 <= lon1 <= 180 and -180 <= lon2 <= 180):
+            raise ValueError("Longitudes must be between -180 and 180.")
+
+        # For ee.Geometry.Rectangle: [xmin, ymin, xmax, ymax]
+        aoi_ee_rect_coords = [min(lon1, lon2), min(lat1, lat2), max(lon1, lon2), max(lat1, lat2)]
         return raw_coords_float, aoi_ee_rect_coords
 
     def run_single_analysis(self):
         self.log_status("Starting single period analysis (interactive map)...");
         aoi_name = self.aoi_name_input.text().strip()
-        if aoi_name: self.log_status(f"AOI Name: {aoi_name}")
+        if aoi_name:
+            self.log_status(f"AOI Name: {aoi_name}")
+
         self.analyze_button.setEnabled(False);
         self.generate_timelapse_button.setEnabled(False)
         self.map_view.setHtml(
             "<html><body style='display:flex;justify-content:center;align-items:center;height:100%;font-family:sans-serif;'><h2>Processing analysis...</h2><p>Map will load shortly.</p></body></html>")
         try:
-            _, aoi_ee_rect_coords = self._parse_coordinates()
+            _, aoi_ee_rect_coords = self._parse_coordinates()  # raw_coords_float is ignored here
             start1 = self.date1_start.date().toString("yyyy-MM-dd");
             end1 = self.date1_end.date().toString("yyyy-MM-dd")
             start2 = self.date2_start.date().toString("yyyy-MM-dd");
             end2 = self.date2_end.date().toString("yyyy-MM-dd")
-            if self.date1_start.date() >= self.date1_end.date() or self.date2_start.date() >= self.date2_end.date() or self.date1_end.date() >= self.date2_start.date(): raise ValueError(
-                "Date ranges invalid/overlapping.")
+            if self.date1_start.date() >= self.date1_end.date() or \
+                    self.date2_start.date() >= self.date2_end.date() or \
+                    self.date1_end.date() >= self.date2_start.date():  # Check for valid, non-overlapping ranges
+                raise ValueError(
+                    "Date ranges are invalid or overlapping. Ensure P1_End < P2_Start, and P1_Start < P1_End, P2_Start < P2_End.")
         except ValueError as ve:
             self.log_status(f"Input Error: {ve}");
-            QMessageBox.warning(self, "Input Error", str(ve));
+            QMessageBox.warning(self, "Input Error", str(ve))
             self.map_view.setHtml(f"<html><body><h2>Input Error:</h2><pre>{ve}</pre></body></html>")
             self.analyze_button.setEnabled(True);
             self.generate_timelapse_button.setEnabled(True);
             return
+
         pd = self.setup_progress_dialog("Single Analysis in Progress...");
-        pd.setRange(0, 0);
+        pd.setRange(0, 0);  # Indeterminate progress for single analysis map
         pd.canceled.connect(self.cancel_single_analysis);
         pd.show()
+
         self.worker = GEEWorker(aoi_ee_rect_coords, start1, end1, start2, end2, self.threshold_input.value(),
                                 project_id=self.project_id)
         self.worker_thread = threading.Thread(target=self.worker.run, daemon=True)
-        self.worker.signals.finished.connect(self.on_single_analysis_complete_map);
-        self.worker.signals.error.connect(self.on_single_analysis_error_map);
+        self.worker.signals.finished.connect(self.on_single_analysis_complete_map)
+        self.worker.signals.error.connect(self.on_single_analysis_error_map)
         self.worker.signals.progress.connect(self.update_progress_label_only);
         self.worker_thread.start()
 
     def update_progress_label_only(self, message):
         self.log_status(message)
-        if self.progress_dialog and self.progress_dialog.isVisible(): QMetaObject.invokeMethod(self.progress_dialog,
-                                                                                               "setLabelText",
-                                                                                               Qt.ConnectionType.QueuedConnection,
-                                                                                               Q_ARG(str, message))
+        if self.progress_dialog and self.progress_dialog.isVisible():
+            # Ensure this is called on the main thread for GUI updates
+            QMetaObject.invokeMethod(self.progress_dialog, "setLabelText", Qt.ConnectionType.QueuedConnection,
+                                     Q_ARG(str, message))
 
     def on_single_analysis_complete_map(self, analysis_data):
-        self.log_status("Single analysis (map data) received.");
+        self.log_status("Single analysis (map data) received.")
         if self.progress_dialog: self.progress_dialog.close()
-        map_id_dict = analysis_data.get('map_id_dict');
-        aoi_bounds_gee = analysis_data.get('aoi_bounds')
+
+        map_id_dict = analysis_data.get('map_id_dict')
+        aoi_bounds_gee = analysis_data.get('aoi_bounds')  # These are [lon, lat] pairs for the GEE geometry bounds
+
         if not map_id_dict or not aoi_bounds_gee:
-            self.log_status("Error: MapID or AOI bounds missing from GEE result.");
+            self.log_status("Error: MapID or AOI bounds missing from GEE result.")
             self.map_view.setHtml(
                 "<html><body><h2>Error:</h2><p>Could not retrieve map data from GEE.</p></body></html>")
             self.analyze_button.setEnabled(True);
-            self.generate_timelapse_button.setEnabled(True);
+            self.generate_timelapse_button.setEnabled(True)
             return
+
         try:
-            lons = [p[0] for p in aoi_bounds_gee];
-            lats = [p[1] for p in aoi_bounds_gee];
-            center_lon = (min(lons) + max(lons)) / 2;
+            # Calculate center for Folium map from GEE bounds
+            lons = [p[0] for p in aoi_bounds_gee]
+            lats = [p[1] for p in aoi_bounds_gee]
+            center_lon = (min(lons) + max(lons)) / 2
             center_lat = (min(lats) + max(lats)) / 2
-            folium_map = folium.Map(location=[center_lat, center_lon], zoom_start=12, tiles=None)
-            folium.TileLayer(tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google',
-                             name='Google Hybrid', overlay=False, control=True, show=True).add_to(folium_map)
-            folium.TileLayer(tiles='https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', attr='Google',
-                             name='Google Roadmap', overlay=False, control=True).add_to(folium_map)
-            folium.TileLayer(tiles=map_id_dict['tile_fetcher'].url_format, attr='Google Earth Engine Analysis',
-                             name='GEE Analysis Layer', overlay=True, control=True, show=True,
-                             max_native_zoom=18).add_to(folium_map)
-            folium.LayerControl().add_to(folium_map)
-            if self.map_html_temp_dir:
+
+            folium_map = folium.Map(location=[center_lat, center_lon], zoom_start=12,
+                                    tiles=None)  # Start with no base tiles
+            # Add Google Hybrid as a default visible layer
+            folium.TileLayer(
+                tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}',
+                # y=satellite, s=hybrid, m=roadmap, t=terrain
+                attr='Google', name='Google Hybrid', overlay=False, control=True, show=True  # Show this by default
+            ).add_to(folium_map)
+            # Add Google Roadmap as an option
+            folium.TileLayer(
+                tiles='https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}',
+                attr='Google', name='Google Roadmap', overlay=False, control=True
+            ).add_to(folium_map)
+            # Add GEE layer
+            folium.TileLayer(
+                tiles=map_id_dict['tile_fetcher'].url_format,
+                attr='Google Earth Engine Analysis',
+                name='GEE Analysis Layer',
+                overlay=True,  # This is an overlay
+                control=True,
+                show=True,  # Show GEE layer by default
+                max_native_zoom=18  # Adjust if needed based on GEE layer resolution
+            ).add_to(folium_map)
+            folium.LayerControl().add_to(folium_map)  # Add layer control to switch layers
+
+            if self.map_html_temp_dir:  # Cleanup previous temp dir if it exists
                 try:
                     self.map_html_temp_dir.cleanup()
                 except Exception as e_clean:
                     self.log_status(f"Note: Error cleaning up previous map temp dir: {e_clean}")
-            self.map_html_temp_dir = tempfile.TemporaryDirectory(prefix="galamsey_map_html_");
+
+            self.map_html_temp_dir = tempfile.TemporaryDirectory(prefix="galamsey_map_html_")
             map_html_path = os.path.join(self.map_html_temp_dir.name, "interactive_map.html")
-            folium_map.save(map_html_path);
-            self.log_status(f"Interactive map saved to: {map_html_path}");
-            self.map_view.setUrl(QUrl.fromLocalFile(os.path.abspath(map_html_path)));
-            self.log_status("Interactive map loaded.")
+
+            folium_map.save(map_html_path)
+            self.log_status(f"Interactive map saved to temporary file: {map_html_path}")
+            self.map_view.setUrl(QUrl.fromLocalFile(os.path.abspath(map_html_path)))  # Load local file
+            self.log_status("Interactive map loaded into view.")
+
         except Exception as e:
-            self.log_status(f"Error creating/displaying Folium map: {e}"); self.map_view.setHtml(
-                f"<html><body><h2>Map Display Error:</h2><pre>{e}</pre></body></html>")
+            self.log_status(f"Error creating/displaying Folium map: {e}\n{traceback.format_exc()}")
+            self.map_view.setHtml(f"<html><body><h2>Map Display Error:</h2><pre>{e}</pre></body></html>")
+
         self.analyze_button.setEnabled(True);
         self.generate_timelapse_button.setEnabled(True)
 
     def on_single_analysis_error_map(self, error_message):
-        self.log_status(f"Single Analysis (map) Error: {error_message}");
-        if self.progress_dialog: self.progress_dialog.close(); QMessageBox.critical(self, "Single Analysis Error",
-                                                                                    error_message)
+        self.log_status(f"Single Analysis (map) Error: {error_message}")
+        if self.progress_dialog: self.progress_dialog.close()
+        QMessageBox.critical(self, "Single Analysis Error", error_message)
         self.map_view.setHtml(f"<html><body><h2>Analysis Failed:</h2><pre>{error_message}</pre></body></html>")
         self.analyze_button.setEnabled(True);
         self.generate_timelapse_button.setEnabled(True)
 
     def cancel_single_analysis(self):
-        self.log_status("Attempting to cancel single analysis...");
+        self.log_status("Attempting to cancel single analysis...")
         if self.worker: self.worker.is_cancelled = True
-        if self.progress_dialog: self.progress_dialog.close()
+        if self.progress_dialog: self.progress_dialog.close()  # Close it on cancel
         self.map_view.setHtml(
             "<html><body style='display:flex;justify-content:center;align-items:center;height:100%;font-family:sans-serif;color:grey;'><p>Analysis Cancelled. Map will appear here.</p></body></html>")
-        self.analyze_button.setEnabled(True);
+        self.analyze_button.setEnabled(True);  # Re-enable
         self.generate_timelapse_button.setEnabled(True)
 
     def run_timelapse_generation(self):
-        self.log_status("Starting time-lapse...");
+        self.log_status("Starting time-lapse video generation...");
 
-        # --- MANDATORY AOI NAME CHECK ---
         aoi_name_from_input = self.aoi_name_input.text().strip()
         if not aoi_name_from_input:
             self.log_status("Input Error TL: AOI name is mandatory for video generation.");
             QMessageBox.warning(self, "Input Error",
                                 "AOI name is mandatory for video generation.\nPlease enter a name in the 'AOI:' field.")
-            self.analyze_button.setEnabled(True);  # Re-enable buttons
-            self.generate_timelapse_button.setEnabled(True);
-            return
+            return  # Do not proceed, keep buttons disabled until valid input
 
-        # Sanitize the AOI name
         temp_sanitized_aoi_name = "".join(c if c.isalnum() or c == '_' else '_' for c in aoi_name_from_input)
-        final_sanitized_aoi_name = "_".join(s for s in temp_sanitized_aoi_name.split('_') if s)
+        final_sanitized_aoi_name = "_".join(s for s in temp_sanitized_aoi_name.split('_') if s).strip(
+            '_')  # Remove leading/trailing
 
         if not final_sanitized_aoi_name:
             self.log_status(
-                f"Input Error TL: AOI name '{aoi_name_from_input}' sanitized to an empty string. Please use alphanumeric characters.");
+                f"Input Error TL: AOI name '{aoi_name_from_input}' sanitized to an empty/invalid string. Please use alphanumeric characters.");
             QMessageBox.warning(self, "Input Error",
-                                f"AOI name '{aoi_name_from_input}' is invalid for a filename (e.g., contains only special characters). Please use a name with alphanumeric characters.")
-            self.analyze_button.setEnabled(True);  # Re-enable buttons
-            self.generate_timelapse_button.setEnabled(True);
+                                f"AOI name '{aoi_name_from_input}' is invalid for a filename (e.g., contains only special characters or spaces). Please use a name with alphanumeric characters and underscores.")
             return
-        # --- END MANDATORY AOI NAME CHECK ---
 
-        self.log_status(f"AOI Name for Timelapse: {final_sanitized_aoi_name}")  # Log the sanitized name being used
+        self.log_status(f"Using AOI Name for Timelapse: {final_sanitized_aoi_name}")
 
-        self.analyze_button.setEnabled(False);
+        self.analyze_button.setEnabled(False);  # Disable buttons during processing
         self.generate_timelapse_button.setEnabled(False)
-        self.active_timelapse_start_year = None;
+        self.active_timelapse_start_year = None;  # Reset active timelapse info
         self.active_timelapse_end_year = None;
         self.active_timelapse_fps = None;
-        self._update_year_label_for_slider(0)
+        self._update_year_label_for_slider(0)  # Reset year label
+
         try:
+            # raw_coords_input are the [Lat1, Lon1, Lat2, Lon2] from GUI
             raw_coords_input, aoi_ee_rect_coords = self._parse_coordinates()
             baseline_start = self.date1_start.date().toString("yyyy-MM-dd");
             baseline_end = self.date1_end.date().toString("yyyy-MM-dd")
             tl_start_year = self.timelapse_start_year_input.value();
             tl_end_year = self.timelapse_end_year_input.value()
-            if self.date1_start.date() >= self.date1_end.date(): raise ValueError("Baseline date error.")
-            if tl_start_year > tl_end_year: raise ValueError("Timelapse year order error.")
-            if QDate(tl_start_year, 1, 1) <= self.date1_end.date(): raise ValueError("Timelapse start after baseline.")
+
+            if self.date1_start.date() >= self.date1_end.date(): raise ValueError(
+                "Baseline date range is invalid (start must be before end).")
+            if tl_start_year > tl_end_year: raise ValueError(
+                "Timelapse year range is invalid (start year must be before or same as end year).")
+            if QDate(tl_start_year, 1, 1) <= self.date1_end.date():  # Ensure timelapse starts after baseline
+                raise ValueError("Timelapse start year must be after the baseline period's end date.")
 
             coord_fn_parts_str = '_'.join([str(c).replace('.', 'p').replace('-', 'm') for c in raw_coords_input])
-            # Filename always starts with the sanitized AOI name
             video_filename_base = f"{final_sanitized_aoi_name}_{coord_fn_parts_str}_{tl_start_year}-{tl_end_year}_timelapse.mp4"
 
             videos_dir = os.path.join(os.getcwd(), "videos");
@@ -587,22 +757,34 @@ class GalamseyMonitorApp(QWidget):
             self.final_video_path = os.path.join(videos_dir, video_filename_base)
             self.log_status(f"Video will be saved to: {self.final_video_path}")
 
-        except ValueError as ve:  # Catches errors from _parse_coordinates or date checks
-            self.log_status(f"Input Error TL: {ve}");
+        except ValueError as ve:
+            self.log_status(f"Input Error (Timelapse Setup): {ve}");
             QMessageBox.warning(self, "Input Error", str(ve))
-            self.analyze_button.setEnabled(True);
+            self.analyze_button.setEnabled(True);  # Re-enable buttons on input error
             self.generate_timelapse_button.setEnabled(True);
             return
 
         pd = self.setup_progress_dialog("Generating Time-Lapse Video...");
-        pd.setRange(0, tl_end_year - tl_start_year + 1)
+        # Total frames = (end_year - start_year + 1)
+        total_frames_to_process = tl_end_year - tl_start_year + 1
+        pd.setRange(0, total_frames_to_process if total_frames_to_process > 0 else 1)  # Ensure range is at least 0-1
         pd.canceled.connect(self.cancel_timelapse_generation);
         pd.show()
-        self.timelapse_worker = TimeLapseWorker(aoi_ee_rect_coords, baseline_start, baseline_end, tl_start_year,
-                                                tl_end_year,
-                                                self.threshold_input.value(), project_id=self.project_id,
-                                                output_video_path=self.final_video_path,
-                                                fps=self.timelapse_fps_input.value())
+
+        self.timelapse_worker = TimeLapseWorker(
+            aoi_rectangle_coords=aoi_ee_rect_coords,
+            baseline_start_date=baseline_start,
+            baseline_end_date=baseline_end,
+            timelapse_start_year=tl_start_year,
+            timelapse_end_year=tl_end_year,
+            threshold=self.threshold_input.value(),
+            thumb_size=512,  # Consistent thumb size for GEE frames
+            project_id=self.project_id,
+            output_video_path=self.final_video_path,
+            fps=self.timelapse_fps_input.value(),
+            aoi_name=final_sanitized_aoi_name,
+            raw_input_coords=raw_coords_input
+        )
         self.timelapse_worker_thread = threading.Thread(target=self.timelapse_worker.run, daemon=True)
         self.timelapse_worker.signals.finished.connect(self.on_timelapse_complete);
         self.timelapse_worker.signals.error.connect(self.on_timelapse_error)
@@ -610,101 +792,148 @@ class GalamseyMonitorApp(QWidget):
         self.timelapse_worker.signals.frame_processed.connect(self.update_timelapse_progress_value)
         self.timelapse_worker_thread.start()
 
-    def update_timelapse_progress_value(self, cf, tf):
-        if self.progress_dialog and self.progress_dialog.isVisible(): self.progress_dialog.setRange(0,
-                                                                                                    tf); self.progress_dialog.setValue(
-            cf)
+    def update_timelapse_progress_value(self, current_frame_number, total_frames):
+        # This is called by frame_processed signal
+        if self.progress_dialog and self.progress_dialog.isVisible():
+            self.progress_dialog.setRange(0, total_frames)  # Update range in case it changed
+            self.progress_dialog.setValue(current_frame_number)
 
     def on_timelapse_complete(self, video_path):
-        self.log_status(f"Time-Lapse video generated: {video_path}");
+        self.log_status(f"Time-Lapse video generated successfully: {video_path}");
         if self.progress_dialog: self.progress_dialog.close()
+        # Store active timelapse info for media player
         self.active_timelapse_start_year = self.timelapse_start_year_input.value();
         self.active_timelapse_end_year = self.timelapse_end_year_input.value();
         self.active_timelapse_fps = self.timelapse_fps_input.value()
+
         self.media_player.setSource(QUrl.fromLocalFile(video_path));
         self.play_button.setEnabled(True);
         self.position_slider.setEnabled(True)
-        self._update_year_label_for_slider(0);
-        QMessageBox.information(self, "Time-Lapse Ready", f"Time-Lapse video ready.\nSaved: {video_path}")
-        self.analyze_button.setEnabled(True);
+        self._update_year_label_for_slider(0);  # Reset to start
+        QMessageBox.information(self, "Time-Lapse Ready",
+                                f"Time-Lapse video has been generated and loaded.\nSaved to: {video_path}")
+        self.analyze_button.setEnabled(True);  # Re-enable buttons
         self.generate_timelapse_button.setEnabled(True)
 
     def on_timelapse_error(self, error_message):
-        self.log_status(f"Time-Lapse Error: {error_message}");
-        if self.progress_dialog: self.progress_dialog.close(); QMessageBox.critical(self, "Time-Lapse Error",
-                                                                                    error_message)
-        self.analyze_button.setEnabled(True);
+        self.log_status(f"Time-Lapse Generation Error: {error_message}");
+        if self.progress_dialog: self.progress_dialog.close();
+        QMessageBox.critical(self, "Time-Lapse Error", error_message)
+        self.analyze_button.setEnabled(True);  # Re-enable buttons
         self.generate_timelapse_button.setEnabled(True)
+        # Reset active timelapse info as it failed
         self.active_timelapse_start_year = None;
         self.active_timelapse_end_year = None;
         self.active_timelapse_fps = None;
         self._update_year_label_for_slider(0)
 
     def cancel_timelapse_generation(self):
-        self.log_status("Cancelling time-lapse...");
+        self.log_status("Cancelling time-lapse generation...");
         if self.timelapse_worker: self.timelapse_worker.is_cancelled = True
         if self.progress_dialog: self.progress_dialog.close();
-        self.analyze_button.setEnabled(True);
+        self.analyze_button.setEnabled(True);  # Re-enable
         self.generate_timelapse_button.setEnabled(True)
+        # Reset active timelapse info
         self.active_timelapse_start_year = None;
         self.active_timelapse_end_year = None;
         self.active_timelapse_fps = None;
         self._update_year_label_for_slider(0)
 
     def play_video(self):
-        if self.media_player.source().isEmpty(): self.log_status("No video loaded."); return
+        if self.media_player.source().isEmpty():
+            self.log_status("No video loaded to play.");
+            return
         if self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
-            self.media_player.pause(); self.log_status("Video paused.")
+            self.media_player.pause();
+            self.log_status("Video paused.")
         else:
-            self.media_player.play(); self.log_status("Video playing.")
+            self.media_player.play();
+            self.log_status("Video playing.")
 
     def media_state_changed(self, state: QMediaPlayer.PlaybackState):
-        self.play_button.setIcon(self.style().standardIcon(
-            QStyle.StandardPixmap.SP_MediaPause if state == QMediaPlayer.PlaybackState.PlayingState else QStyle.StandardPixmap.SP_MediaPlay))
-        if state == QMediaPlayer.PlaybackState.StoppedState and self.active_timelapse_start_year is not None and self.media_player.position() == self.media_player.duration() and self.media_player.duration() > 0: self._update_year_label_for_slider(
-            self.media_player.duration())
+        self.play_button.setIcon(
+            self.style().standardIcon(
+                QStyle.StandardPixmap.SP_MediaPause if state == QMediaPlayer.PlaybackState.PlayingState else QStyle.StandardPixmap.SP_MediaPlay
+            )
+        )
+        # If stopped at the end, keep the last year displayed
+        if state == QMediaPlayer.PlaybackState.StoppedState and \
+                self.active_timelapse_start_year is not None and \
+                self.media_player.position() == self.media_player.duration() and \
+                self.media_player.duration() > 0:
+            self._update_year_label_for_slider(self.media_player.duration())  # Show last year
 
     def _update_year_label_for_slider(self, position_ms):
-        if self.active_timelapse_start_year is not None and self.active_timelapse_end_year is not None and self.active_timelapse_fps is not None and self.active_timelapse_fps > 0:
+        if self.active_timelapse_start_year is not None and \
+                self.active_timelapse_end_year is not None and \
+                self.active_timelapse_fps is not None and self.active_timelapse_fps > 0:
+
             ms_per_frame = 1000.0 / self.active_timelapse_fps
-            if ms_per_frame <= 0: self.year_label_for_slider.setText("Year: - (FPS Err)"); return
-            cfi = int(position_ms / ms_per_frame);
-            ntf = (self.active_timelapse_end_year - self.active_timelapse_start_year + 1)
-            cfi = max(0, min(cfi, ntf - 1));
-            self.year_label_for_slider.setText(f"Year: {self.active_timelapse_start_year + cfi}")
+            if ms_per_frame <= 0:  # Avoid division by zero or negative
+                self.year_label_for_slider.setText("Year: - (FPS Error)");
+                return
+
+            current_frame_index_float = position_ms / ms_per_frame
+            # Ensure index is within bounds [0, num_total_frames - 1]
+            num_total_frames = (self.active_timelapse_end_year - self.active_timelapse_start_year + 1)
+
+            # Round to nearest frame for display, or floor, depending on desired behavior.
+            # Using floor to match typical video player behavior (shows frame until next one starts)
+            current_frame_index = int(current_frame_index_float)
+            current_frame_index = max(0, min(current_frame_index, num_total_frames - 1))  # Clamp
+
+            current_year = self.active_timelapse_start_year + current_frame_index
+            self.year_label_for_slider.setText(f"Year: {current_year}")
         else:
             self.year_label_for_slider.setText("Year: -")
 
-    def video_position_changed(self, p):
-        self.position_slider.setValue(p); self._update_year_label_for_slider(p)
+    def video_position_changed(self, position_ms):  # position is in milliseconds
+        self.position_slider.setValue(position_ms);
+        self._update_year_label_for_slider(position_ms)
 
-    def video_duration_changed(self, d):
-        self.position_slider.setRange(0, d)
-        if d == 0: self.active_timelapse_start_year = None;self.active_timelapse_end_year = None;self.active_timelapse_fps = None;self._update_year_label_for_slider(
-            0);self.play_button.setEnabled(False);self.position_slider.setEnabled(False)
+    def video_duration_changed(self, duration_ms):  # duration is in milliseconds
+        self.position_slider.setRange(0, duration_ms)
+        if duration_ms == 0:  # Video unloaded or invalid
+            self.active_timelapse_start_year = None;
+            self.active_timelapse_end_year = None;
+            self.active_timelapse_fps = None;
+            self._update_year_label_for_slider(0);
+            self.play_button.setEnabled(False);
+            self.position_slider.setEnabled(False)
 
-    def set_video_position_from_slider(self, p):
-        self.media_player.setPosition(p); self._update_year_label_for_slider(p)
+    def set_video_position_from_slider(self, position_ms):
+        self.media_player.setPosition(position_ms);
+        self._update_year_label_for_slider(position_ms)  # Update label immediately
 
     def handle_media_player_error(self):
         self.play_button.setEnabled(False);
         self.position_slider.setEnabled(False);
-        err = self.media_player.errorString()
-        self.log_status(f"Media Player Error: {err}");
-        QMessageBox.critical(self, "Media Player Error", f"Error: {err}")
+        error_string = self.media_player.errorString()
+        self.log_status(f"Media Player Error: {error_string}");
+        QMessageBox.critical(self, "Media Player Error", f"An error occurred with the media player: {error_string}")
+        # Reset active timelapse info
         self.active_timelapse_start_year = None;
         self.active_timelapse_end_year = None;
         self.active_timelapse_fps = None;
         self._update_year_label_for_slider(0)
 
     def closeEvent(self, event):
-        self.log_status("Closing app...");
-        if self.worker_thread and self.worker_thread.is_alive(): self.cancel_single_analysis()
-        if self.timelapse_worker_thread and self.timelapse_worker_thread.is_alive(): self.cancel_timelapse_generation()
-        self.media_player.stop()
+        self.log_status("Closing application...");
+        # Attempt to cancel any running workers
+        if self.worker_thread and self.worker_thread.is_alive():
+            self.log_status("Cancelling active single analysis worker...")
+            self.cancel_single_analysis()  # This sets worker.is_cancelled
+            self.worker_thread.join(timeout=2)  # Wait briefly for thread to finish
+        if self.timelapse_worker_thread and self.timelapse_worker_thread.is_alive():
+            self.log_status("Cancelling active time-lapse worker...")
+            self.cancel_timelapse_generation()  # This sets worker.is_cancelled
+            self.timelapse_worker_thread.join(timeout=2)  # Wait briefly
+
+        self.media_player.stop()  # Stop media player
         if self.map_html_temp_dir:
             try:
-                self.map_html_temp_dir.cleanup(); self.log_status("Cleaned up temporary map HTML directory.")
+                self.map_html_temp_dir.cleanup()
+                self.log_status("Cleaned up temporary map HTML directory.")
             except Exception as e:
                 self.log_status(f"Error cleaning up map HTML temp dir on close: {e}")
         self.log_status("Cleanup complete. Exiting.");
@@ -714,6 +943,7 @@ class GalamseyMonitorApp(QWidget):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setApplicationName("GalamseyMonitorApp")
+    # For better cross-platform look, consider Fusion style
     # app.setStyle("Fusion")
     monitor_app = GalamseyMonitorApp()
     monitor_app.show()
