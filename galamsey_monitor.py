@@ -218,7 +218,7 @@ def process_single_gee_frame(aoi_rectangle_coords: list,
 
         if progress_emitter:
             progress_emitter(f"Frame: Downloading image ({dims_str})...")
-        response = requests.get(thumb_url, timeout=60)
+        response = requests.get(thumb_url, timeout=120)
         response.raise_for_status()
         return Image.open(io.BytesIO(response.content))
 
