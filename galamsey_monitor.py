@@ -626,7 +626,7 @@ class GalamseyMonitorApp(QWidget):
         self.tl_fps_input.setValue(1) # Default 1 FPS
         timelapse_form_layout.addRow("Video FPS:", self.tl_fps_input)
         controls_layout.addLayout(timelapse_form_layout)
-        self.generate_tl_button = QPushButton("Generate & Load Time-Lapse")
+        self.generate_tl_button = QPushButton("Generate Time-Lapse Video")
         controls_layout.addWidget(self.generate_tl_button)
         controls_layout.addStretch(1)
         controls_panel.setMinimumWidth(220)
@@ -1082,7 +1082,7 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setApplicationName("GalamseyMonitorApp")
     # For a more modern look on some platforms, consider:
-    # app.setStyle("Fusion")
+    app.setStyle("Fusion")
     monitor_app = GalamseyMonitorApp()
     monitor_app.show()
     sys.exit(app.exec())
