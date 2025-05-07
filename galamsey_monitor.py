@@ -560,8 +560,8 @@ class GalamseyMonitorApp(QWidget):
         self.coord_input = QLineEdit("6.401452,-0.594587,6.355603,-0.496084")
         self.coord_input.setToolTip("Lat1,Lon1,Lat2,Lon2 (e.g. 6.3,-1.8,6.4,-1.7)")
         single_form.addRow("AOI Coords:", self.coord_input)
-        self.date1_start = QDateEdit(QDate(2018, 1, 1))
-        self.date1_end = QDateEdit(QDate(2018, 12, 31))
+        self.date1_start = QDateEdit(QDate(2020, 1, 1))
+        self.date1_end = QDateEdit(QDate(2020, 12, 31))
         self.date2_start = QDateEdit(QDate(2025, 1, 1))
         self.date2_end = QDateEdit(QDate.currentDate())
         for dt_edit in [self.date1_start, self.date1_end, self.date2_start, self.date2_end]:
