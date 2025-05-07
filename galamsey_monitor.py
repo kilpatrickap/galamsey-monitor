@@ -195,7 +195,7 @@ class TimeLapseWorker(QObject):
         # --- Border and Text Definitions ---
         top_border_height = 40
         bottom_border_height = 70
-        left_border_width = 230
+        left_border_width = 160 # Reduced from 230
         right_border_width = 20  # Minimal right border, text is mostly on left/bottom
         text_color = (255, 255, 255)  # White
         border_bg_color = (0, 0, 0)  # Black
@@ -224,6 +224,8 @@ class TimeLapseWorker(QObject):
         bordered_frame_width = content_width + left_border_width + right_border_width
         bordered_frame_height = content_height + top_border_height + bottom_border_height
         video_frame_size = (bordered_frame_width, bordered_frame_height)
+        self.signals.progress.emit(f"Video frame size will be: {video_frame_size[0]}x{video_frame_size[1]}")
+
 
         video_writer_initialized = False
         out_video = None
@@ -505,7 +507,7 @@ class GalamseyMonitorApp(QWidget):
         main_v_splitter.addWidget(top_h_splitter);
         main_v_splitter.addWidget(timelapse_video_group);
         main_v_splitter.addWidget(status_group);
-        main_v_splitter.setSizes([450, 280, 120])  # Adjusted log height
+        main_v_splitter.setSizes([300, 370, 80])  # Give more space to video, less to log and top
         main_layout.addWidget(main_v_splitter)
         self.analyze_button.clicked.connect(self.run_single_analysis);
         self.generate_timelapse_button.clicked.connect(self.run_timelapse_generation)
@@ -778,7 +780,7 @@ class GalamseyMonitorApp(QWidget):
             timelapse_start_year=tl_start_year,
             timelapse_end_year=tl_end_year,
             threshold=self.threshold_input.value(),
-            thumb_size=512,  # Consistent thumb size for GEE frames
+            thumb_size=768,  # Increased from 512
             project_id=self.project_id,
             output_video_path=self.final_video_path,
             fps=self.timelapse_fps_input.value(),
