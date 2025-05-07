@@ -562,7 +562,7 @@ class GalamseyMonitorApp(QWidget):
         single_form.addRow("AOI Coords:", self.coord_input)
         self.date1_start = QDateEdit(QDate(2020, 1, 1))
         self.date1_end = QDateEdit(QDate(2020, 12, 31))
-        self.date2_start = QDateEdit(QDate(2023, 1, 1)) # Default to a more recent year
+        self.date2_start = QDateEdit(QDate(2025, 1, 1))
         self.date2_end = QDateEdit(QDate.currentDate())
         for dt_edit in [self.date1_start, self.date1_end, self.date2_start, self.date2_end]:
             dt_edit.setCalendarPopup(True)
