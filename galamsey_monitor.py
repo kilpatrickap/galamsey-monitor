@@ -218,7 +218,7 @@ def process_single_gee_frame(aoi_rectangle_coords: list,
 
         if progress_emitter:
             progress_emitter(f"Frame: Downloading image ({dims_str})...")
-        response = requests.get(thumb_url, timeout=120)
+        response = requests.get(thumb_url, timeout=180)     # timeout 3mins
         response.raise_for_status()
         return Image.open(io.BytesIO(response.content))
 
@@ -560,8 +560,8 @@ class GalamseyMonitorApp(QWidget):
         self.coord_input = QLineEdit("6.401452,-0.594587,6.355603,-0.496084")
         self.coord_input.setToolTip("Lat1,Lon1,Lat2,Lon2 (e.g. 6.3,-1.8,6.4,-1.7)")
         single_form.addRow("AOI Coords:", self.coord_input)
-        self.date1_start = QDateEdit(QDate(2020, 1, 1))
-        self.date1_end = QDateEdit(QDate(2020, 12, 31))
+        self.date1_start = QDateEdit(QDate(2018, 1, 1))
+        self.date1_end = QDateEdit(QDate(2018, 12, 31))
         self.date2_start = QDateEdit(QDate(2025, 1, 1))
         self.date2_end = QDateEdit(QDate.currentDate())
         for dt_edit in [self.date1_start, self.date1_end, self.date2_start, self.date2_end]:
@@ -615,7 +615,7 @@ class GalamseyMonitorApp(QWidget):
         timelapse_form_layout = QFormLayout()
         self.tl_start_year_input = QSpinBox()
         self.tl_start_year_input.setRange(2000, QDate.currentDate().year())
-        self.tl_start_year_input.setValue(QDate.currentDate().year() - 4) # Default 4 years ago
+        self.tl_start_year_input.setValue(QDate.currentDate().year() - 6) # Default 6 years ago
         timelapse_form_layout.addRow("Start Year:", self.tl_start_year_input)
         self.tl_end_year_input = QSpinBox()
         self.tl_end_year_input.setRange(2000, QDate.currentDate().year() + 5)
