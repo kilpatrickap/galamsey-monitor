@@ -305,7 +305,7 @@ class GalamseyMonitorApp(QWidget):
         # --- Top Section: Analysis Controls and Map (Horizontal Splitter) ---
         single_analysis_group = QGroupBox("Single Period Analysis")
         single_analysis_form_layout = QFormLayout()
-        self.coord_input = QLineEdit("6.335836, -1.795049, 6.365126, -1.745373")
+        self.coord_input = QLineEdit("6.401452, -0.594587, 6.355603, -0.496084")
         self.coord_input.setToolTip("Enter coordinates as: Lat1, Lon1, Lat2, Lon2 (e.g., 6.3, -1.8, 6.4, -1.7)")
         self.date1_start = QDateEdit(QDate(2020, 1, 1));
         self.date1_end = QDateEdit(QDate(2020, 12, 31))
