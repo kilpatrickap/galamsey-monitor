@@ -282,6 +282,8 @@ class TimeLapseWorker(QObject):
         try:
             ee.Initialize(project=self.project_id)
         except Exception:
+            # GEE might already be initialized or init might fail.
+            # Subsequent calls will raise errors if not initialized.
             pass
 
         video_output_width, video_output_height = self.output_dimensions
@@ -339,7 +341,7 @@ class TimeLapseWorker(QObject):
                         if gee_pil_image.mode != 'RGBA' else gee_pil_image.copy()
                 else:
                     current_frame_rgba = Image.new('RGBA', video_frame_size,
-                                                   (0, 0, 0, 255))
+                                                   (0, 0, 0, 255)) # Solid black
                     draw_temp = ImageDraw.Draw(current_frame_rgba)
                     no_data_text = f"NO DATA FOR {year}"
                     text_w, text_h = self._get_text_size(draw_temp,
@@ -352,17 +354,7 @@ class TimeLapseWorker(QObject):
 
                 draw = ImageDraw.Draw(current_frame_rgba)
 
-                # AOI Name (Top Center)
-                aoi_text_content = self.aoi_name
-                aoi_w, aoi_h = self._get_text_size(draw, aoi_text_content, font_title)
-                aoi_pos_x = (video_output_width - (aoi_w + 2 * text_padding)) / 2
-                aoi_pos_y = text_padding
-                _, _, _, aoi_bg_y1 = self._draw_text_with_background(
-                    draw, aoi_text_content, font_title, (aoi_pos_x, aoi_pos_y),
-                    text_color, bg_color_semi_transparent, text_padding
-                )
-
-                # Coordinates (Top-Left)
+                # --- Coordinates (Top-Left) ---
                 coord_texts = [
                     ("Top-left-corner:", font_coords_header, 3),
                     (f"  Lat 1: {self.raw_input_coords[0]:.6f}", font_coords_value, 3),
@@ -372,81 +364,112 @@ class TimeLapseWorker(QObject):
                     (f"  Lon 2: {self.raw_input_coords[3]:.6f}", font_coords_value, 0),
                 ]
                 max_coord_w = 0
-                current_coord_y = aoi_bg_y1 + text_padding  # Below AOI title
-                coords_block_height = 0
-                line_heights = []
+                coords_block_total_h = 0
+                coord_line_heights = []
 
-                for text, font, _ in coord_texts:
-                    lw, lh_font = self._get_text_size(draw, "Ay", font)  # Consistent height
-                    line_heights.append(lh_font)
-                    max_coord_w = max(max_coord_w, self._get_text_size(draw, text, font)[0])
+                for text_content, font, _ in coord_texts:
+                    # Use a consistent line height metric based on font
+                    _, font_line_h = self._get_text_size(draw, "Ay", font)
+                    coord_line_heights.append(font_line_h)
+                    text_w, _ = self._get_text_size(draw, text_content, font)
+                    max_coord_w = max(max_coord_w, text_w)
 
-                # Calculate total height for background
                 for idx, (_, _, spacing) in enumerate(coord_texts):
-                    coords_block_height += line_heights[idx] + spacing
-                if coord_texts:
-                    coords_block_height -= coord_texts[-1][2]  # Remove last spacing
+                    coords_block_total_h += coord_line_heights[idx] + spacing
+                if coord_texts: # Remove last spacing if any texts
+                    coords_block_total_h -= coord_texts[-1][2]
 
                 coords_bg_x0 = text_padding
-                coords_bg_y0 = current_coord_y
+                coords_bg_y0 = text_padding # Align with top
                 coords_bg_width = max_coord_w + 2 * text_padding
-                coords_bg_height = coords_block_height + 2 * text_padding
+                coords_bg_height_with_padding = coords_block_total_h + 2 * text_padding
+
+                # Draw Coordinates Background
                 draw.rectangle(
                     [coords_bg_x0, coords_bg_y0,
-                     coords_bg_x0 + coords_bg_width, coords_bg_y0 + coords_bg_height],
+                     coords_bg_x0 + coords_bg_width,
+                     coords_bg_y0 + coords_bg_height_with_padding],
                     fill=bg_color_semi_transparent
                 )
+                # Draw Coordinates Text
+                current_y_for_coord_text = coords_bg_y0 + text_padding
+                for idx, (text_content, font, spacing) in enumerate(coord_texts):
+                    draw.text((coords_bg_x0 + text_padding, current_y_for_coord_text),
+                              text_content, font=font, fill=text_color)
+                    current_y_for_coord_text += coord_line_heights[idx] + spacing
 
-                current_y_text = coords_bg_y0 + text_padding
-                for idx, (text, font, spacing) in enumerate(coord_texts):
-                    draw.text((coords_bg_x0 + text_padding, current_y_text),
-                              text, font=font, fill=text_color)
-                    current_y_text += line_heights[idx] + spacing
+                coords_bg_x1_edge = coords_bg_x0 + coords_bg_width # Right edge of coords block
 
-                # Year (Bottom-Right)
-                year_text = f"YEAR: {year}"
-                year_w, year_h = self._get_text_size(draw, year_text, font_year_info)
-                year_pos_x = video_output_width - (year_w + 3 * text_padding)
-                year_pos_y = video_output_height - (year_h + 3 * text_padding)
+                # --- AOI Name (Positioned to the right of Coordinates block) ---
+                aoi_text_content = self.aoi_name
+                aoi_w, aoi_h = self._get_text_size(draw, aoi_text_content, font_title)
+                aoi_bg_total_width = aoi_w + 2 * text_padding
+
+                # Attempt to center AOI title in the space right of the coordinates block
+                # or place it directly after if space is limited.
+                available_width_for_aoi = video_output_width - coords_bg_x1_edge - (2 * text_padding)
+
+                if aoi_bg_total_width < available_width_for_aoi:
+                    aoi_pos_x = coords_bg_x1_edge + text_padding + \
+                                (available_width_for_aoi - aoi_bg_total_width) / 2
+                else: # Not enough space to center, or coord block is too wide
+                    aoi_pos_x = coords_bg_x1_edge + text_padding
+
+                aoi_pos_y = text_padding # Align with top, same as coordinates block
+
                 self._draw_text_with_background(
-                    draw, year_text, font_year_info, (year_pos_x, year_pos_y),
+                    draw, aoi_text_content, font_title, (aoi_pos_x, aoi_pos_y),
                     text_color, bg_color_semi_transparent, text_padding
                 )
 
-                # Bottom-Left Info
+                # --- Year (Bottom-Right) ---
+                year_text = f"YEAR: {year}"
+                year_w, year_h = self._get_text_size(draw, year_text, font_year_info)
+                # Position from bottom-right corner
+                year_bg_x0 = video_output_width - (year_w + 2 * text_padding) - text_padding
+                year_bg_y0 = video_output_height - (year_h + 2 * text_padding) - text_padding
+                self._draw_text_with_background(
+                    draw, year_text, font_year_info, (year_bg_x0, year_bg_y0),
+                    text_color, bg_color_semi_transparent, text_padding
+                )
+
+                # --- Bottom-Left Info (Loss, Copyright, Rights) ---
                 bl_texts = [
                     ("Red shows potential Vegetative Loss", font_bottom_info, 3),
                     ("Copyright KilTech Ent 2025", font_bottom_info, 3),
                     ("All rights reserved.", font_bottom_info, 0)
                 ]
                 max_bl_w = 0
-                bl_block_height = 0
+                bl_block_total_h = 0
                 bl_line_heights = []
 
-                for text, font, _ in bl_texts:
-                    lw, lh_font = self._get_text_size(draw, "Ay", font)
-                    bl_line_heights.append(lh_font)
-                    max_bl_w = max(max_bl_w, self._get_text_size(draw, text, font)[0])
+                for text_content, font, _ in bl_texts:
+                    _, font_line_h = self._get_text_size(draw, "Ay", font)
+                    bl_line_heights.append(font_line_h)
+                    text_w, _ = self._get_text_size(draw, text_content, font)
+                    max_bl_w = max(max_bl_w, text_w)
 
                 for idx, (_, _, spacing) in enumerate(bl_texts):
-                    bl_block_height += bl_line_heights[idx] + spacing
-                if bl_texts:
-                    bl_block_height -= bl_texts[-1][2]
+                    bl_block_total_h += bl_line_heights[idx] + spacing
+                if bl_texts: # Remove last spacing
+                    bl_block_total_h -= bl_texts[-1][2]
 
                 bl_bg_x0 = text_padding
-                bl_bg_height_total = bl_block_height + 2 * text_padding
-                bl_bg_y0 = video_output_height - bl_bg_height_total - text_padding
+                bl_bg_height_with_padding = bl_block_total_h + 2 * text_padding
+                bl_bg_y0 = video_output_height - bl_bg_height_with_padding - text_padding # From bottom
                 bl_bg_width = max_bl_w + 2 * text_padding
+
                 draw.rectangle(
                     [bl_bg_x0, bl_bg_y0,
-                     bl_bg_x0 + bl_bg_width, bl_bg_y0 + bl_bg_height_total],
+                     bl_bg_x0 + bl_bg_width,
+                     bl_bg_y0 + bl_bg_height_with_padding],
                     fill=bg_color_semi_transparent
                 )
 
                 current_y_bl_text = bl_bg_y0 + text_padding
-                for idx, (text, font, spacing) in enumerate(bl_texts):
+                for idx, (text_content, font, spacing) in enumerate(bl_texts):
                     draw.text((bl_bg_x0 + text_padding, current_y_bl_text),
-                              text, font=font, fill=text_color)
+                              text_content, font=font, fill=text_color)
                     current_y_bl_text += bl_line_heights[idx] + spacing
 
                 # Convert to RGB for OpenCV
@@ -488,7 +511,6 @@ class TimeLapseWorker(QObject):
                 f"Time-lapse overlay/compilation error: {e}\nTrace: {tb_str}")
             if video_writer_initialized and out_video:
                 out_video.release()
-
 
 # --- Main Application Window ---
 class GalamseyMonitorApp(QWidget):
