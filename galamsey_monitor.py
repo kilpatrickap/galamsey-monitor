@@ -615,7 +615,7 @@ class GalamseyMonitorApp(QWidget):
         timelapse_form_layout = QFormLayout()
         self.tl_start_year_input = QSpinBox()
         self.tl_start_year_input.setRange(2000, QDate.currentDate().year())
-        self.tl_start_year_input.setValue(QDate.currentDate().year() - 6) # Default 6 years ago
+        self.tl_start_year_input.setValue(QDate.currentDate().year() - 4) # Default 4 years ago
         timelapse_form_layout.addRow("Start Year:", self.tl_start_year_input)
         self.tl_end_year_input = QSpinBox()
         self.tl_end_year_input.setRange(2000, QDate.currentDate().year() + 5)
