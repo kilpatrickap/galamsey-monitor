@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QDateEdit, QDoubleSpinBox, QTextEdit, QFormLayout,
     QGroupBox, QProgressDialog, QMessageBox, QSpinBox, QFileDialog,
-    QSlider, QStyle, QSplitter, QSizePolicy  # Added QSplitter, QSizePolicy
+    QSlider, QStyle, QSplitter, QSizePolicy
 )
 from PyQt6.QtGui import QPixmap, QImage
 from PyQt6.QtCore import QDate, pyqtSignal, QObject, Qt, QMetaObject, Q_ARG, QUrl
@@ -259,7 +259,7 @@ class GalamseyMonitorApp(QWidget):
         self.setWindowTitle("Galamsey Monitor")
 
         # Start with a reasonably large default size, user can resize
-        self.setGeometry(10, 40, 1400, 750)  # Increased initial size slightly
+        self.setGeometry(10, 40, 1400, 750)
 
         self.worker_thread = None;
         self.worker = None
@@ -277,11 +277,7 @@ class GalamseyMonitorApp(QWidget):
         self.media_player = QMediaPlayer()
         self.video_widget = QVideoWidget()
         self.media_player.setVideoOutput(self.video_widget)
-
-        # Set an expanding size policy for the video widget, crucial for layout management
         self.video_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-
-
 
         self.play_button = QPushButton();
         self.play_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay));
@@ -293,18 +289,24 @@ class GalamseyMonitorApp(QWidget):
         self.position_slider.setEnabled(False)
         self.year_label_for_slider = QLabel("Year: -")
 
-
         self.media_player.playbackStateChanged.connect(self.media_state_changed);
         self.media_player.positionChanged.connect(self.video_position_changed)
         self.media_player.durationChanged.connect(self.video_duration_changed);
         self.media_player.errorOccurred.connect(self.handle_media_player_error)
 
-        # Main layout will hold the main vertical splitter
         main_layout = QVBoxLayout(self)
 
         # --- Top Section: Analysis Controls and Map (Horizontal Splitter) ---
         single_analysis_group = QGroupBox("Single Period Analysis")
         single_analysis_form_layout = QFormLayout()
+
+        # AOI Name input
+        self.aoi_name_label = QLabel("AOI:")
+        self.aoi_name_input = QLineEdit()
+        self.aoi_name_input.setPlaceholderText("e.g., Anyinam")
+        self.aoi_name_input.setToolTip("Enter a descriptive name for this Area of Interest (optional).")
+        single_analysis_form_layout.addRow(self.aoi_name_label, self.aoi_name_input)
+
         self.coord_input = QLineEdit("6.401452, -0.594587, 6.355603, -0.496084")
         self.coord_input.setToolTip("Enter coordinates as: Lat1, Lon1, Lat2, Lon2 (e.g., 6.3, -1.8, 6.4, -1.7)")
         self.date1_start = QDateEdit(QDate(2020, 1, 1));
@@ -318,6 +320,7 @@ class GalamseyMonitorApp(QWidget):
         self.analyze_button = QPushButton("Analyze Single Period")
         for dt_edit in [self.date1_start, self.date1_end, self.date2_start, self.date2_end]: dt_edit.setCalendarPopup(
             True); dt_edit.setDisplayFormat("dd-MM-yyyy")
+
         single_analysis_form_layout.addRow(QLabel("AOI Coords (Lat1, Lon1, Lat2, Lon2):"), self.coord_input)
         single_analysis_form_layout.addRow(QLabel("Period 1 Start (Baseline):"), self.date1_start);
         single_analysis_form_layout.addRow(QLabel("Period 1 End (Baseline):"), self.date1_end)
@@ -326,7 +329,7 @@ class GalamseyMonitorApp(QWidget):
         single_analysis_form_layout.addRow(QLabel("NDVI Change Threshold:"), self.threshold_input);
         single_analysis_form_layout.addRow(self.analyze_button)
         single_analysis_group.setLayout(single_analysis_form_layout);
-        single_analysis_group.setMinimumWidth(450) # Optional: ensure controls don't get too squished
+        single_analysis_group.setMinimumWidth(450)
 
         map_group = QGroupBox("Interactive Map Preview (Red shows potential vegetation loss)")
         map_v_layout = QVBoxLayout()
@@ -336,24 +339,22 @@ class GalamseyMonitorApp(QWidget):
         self.map_view.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
         self.map_view.setHtml(
             "<html><body style='display:flex;justify-content:center;align-items:center;height:100%;font-family:sans-serif;color:grey;'><p>Map will appear here after analysis.</p></body></html>")
-        self.map_view.setMinimumSize(400, 300)  # Ensure map has a minimum usable size
+        self.map_view.setMinimumSize(400, 300)
         map_v_layout.addWidget(self.map_view)
         map_group.setLayout(map_v_layout)
 
         top_h_splitter = QSplitter(Qt.Orientation.Horizontal)
         top_h_splitter.addWidget(single_analysis_group)
         top_h_splitter.addWidget(map_group)
-        top_h_splitter.setSizes([380, 800])  # Initial proportional sizes for controls and map
+        top_h_splitter.setSizes([380, 800])
 
-        # --- Time-Lapse and Video Player Section (MODIFIED LAYOUT) ---
+        # --- Time-Lapse and Video Player Section ---
         timelapse_video_group = QGroupBox("Time-Lapse Video")
-        # Main layout for this groupbox is now Horizontal
         main_timelapse_h_layout = QHBoxLayout()
 
-        # -- Left Panel: Timelapse Controls --
         timelapse_controls_panel = QWidget()
         left_v_layout = QVBoxLayout(timelapse_controls_panel)
-        left_v_layout.setContentsMargins(0, 5, 5, 5)  # Adjust margins as needed
+        left_v_layout.setContentsMargins(0, 5, 5, 5)
 
         self.timelapse_start_year_input = QSpinBox()
         self.timelapse_start_year_input.setRange(2000, QDate.currentDate().year())
@@ -364,42 +365,35 @@ class GalamseyMonitorApp(QWidget):
         self.timelapse_fps_input = QSpinBox()
         self.timelapse_fps_input.setRange(1, 30)
         self.timelapse_fps_input.setValue(1)
-
-        # Button is initialized here but added to left_v_layout later
         self.generate_timelapse_button = QPushButton("Generate & Load Time-Lapse Video")
 
-        timelapse_form_inputs_layout = QFormLayout()  # Form for inputs only
+        timelapse_form_inputs_layout = QFormLayout()
         timelapse_form_inputs_layout.addRow(QLabel("Time-Lapse Start Year:"), self.timelapse_start_year_input)
         timelapse_form_inputs_layout.addRow(QLabel("Time-Lapse End Year:"), self.timelapse_end_year_input)
         timelapse_form_inputs_layout.addRow(QLabel("Video FPS:"), self.timelapse_fps_input)
 
-        left_v_layout.addLayout(timelapse_form_inputs_layout)  # Add form to left panel
-        left_v_layout.addWidget(self.generate_timelapse_button)  # Add button below form
-        left_v_layout.addStretch(1)  # Push controls to the top
+        left_v_layout.addLayout(timelapse_form_inputs_layout)
+        left_v_layout.addWidget(self.generate_timelapse_button)
+        left_v_layout.addStretch(1)
 
-        timelapse_controls_panel.setMinimumWidth(220)  # Give controls panel a minimum width
-        timelapse_controls_panel.setMaximumWidth(300)  # And a maximum width
+        timelapse_controls_panel.setMinimumWidth(220)
+        timelapse_controls_panel.setMaximumWidth(300)
 
-        # -- Right Panel: Video Player --
         video_display_panel = QWidget()
         right_v_layout = QVBoxLayout(video_display_panel)
         right_v_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Video player controls (play, slider)
         video_player_controls_layout = QHBoxLayout()
         video_player_controls_layout.addWidget(self.play_button)
-        video_player_controls_layout.addWidget(self.position_slider, 1)  # Slider takes available space
+        video_player_controls_layout.addWidget(self.position_slider, 1)
         video_player_controls_layout.addWidget(self.year_label_for_slider)
 
-        right_v_layout.addWidget(self.video_widget, 1)  # Video widget takes most space, stretch factor 1
-        right_v_layout.addLayout(video_player_controls_layout)  # Player controls below video
+        right_v_layout.addWidget(self.video_widget, 1)
+        right_v_layout.addLayout(video_player_controls_layout)
+        self.video_widget.setMinimumHeight(200)
 
-        self.video_widget.setMinimumHeight(200)  # Minimum height for video player itself
-
-        # Add left and right panels to the main horizontal layout of the groupbox
-        main_timelapse_h_layout.addWidget(timelapse_controls_panel)  # Default stretch factor 0
-        main_timelapse_h_layout.addWidget(video_display_panel, 1)  # Stretch factor 1 (takes more space)
-
+        main_timelapse_h_layout.addWidget(timelapse_controls_panel)
+        main_timelapse_h_layout.addWidget(video_display_panel, 1)
         timelapse_video_group.setLayout(main_timelapse_h_layout)
 
         # --- Status Log Section ---
@@ -407,8 +401,7 @@ class GalamseyMonitorApp(QWidget):
         status_v_layout = QVBoxLayout();
         self.status_log = QTextEdit();
         self.status_log.setReadOnly(True);
-        self.status_log.setMinimumHeight(80)  # Minimum height for the log
-        # Allow log to expand vertically if space is available in its splitter pane
+        self.status_log.setMinimumHeight(80)
         self.status_log.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         status_v_layout.addWidget(self.status_log);
         status_group.setLayout(status_v_layout);
@@ -418,11 +411,9 @@ class GalamseyMonitorApp(QWidget):
         main_v_splitter.addWidget(top_h_splitter)
         main_v_splitter.addWidget(timelapse_video_group)
         main_v_splitter.addWidget(status_group)
+        main_v_splitter.setSizes([450, 280, 170])
 
-        # Adjust initial sizes if needed, e.g., timelapse section might be shorter now
-        main_v_splitter.setSizes([450, 280, 170])  # Example: more for top, bit less for video, more for log
-
-        main_layout.addWidget(main_v_splitter)  # Add the main splitter to the window's layout
+        main_layout.addWidget(main_v_splitter)
 
         self.analyze_button.clicked.connect(self.run_single_analysis)
         self.generate_timelapse_button.clicked.connect(self.run_timelapse_generation)
@@ -478,6 +469,11 @@ class GalamseyMonitorApp(QWidget):
 
     def run_single_analysis(self):
         self.log_status("Starting single period analysis (interactive map)...");
+        # Optionally, log the AOI name if provided
+        aoi_name = self.aoi_name_input.text().strip()
+        if aoi_name:
+            self.log_status(f"AOI Name: {aoi_name}")
+
         self.analyze_button.setEnabled(False);
         self.generate_timelapse_button.setEnabled(False)
         self.map_view.setHtml(
@@ -550,7 +546,7 @@ class GalamseyMonitorApp(QWidget):
                 tiles=map_id_dict['tile_fetcher'].url_format,
                 attr='Google Earth Engine Analysis',
                 name='GEE Analysis Layer',
-                overlay=True, control=True, show=True, max_native_zoom=18  # Adjusted max_native_zoom
+                overlay=True, control=True, show=True, max_native_zoom=18
             ).add_to(folium_map)
             folium.LayerControl().add_to(folium_map)
 
@@ -594,6 +590,10 @@ class GalamseyMonitorApp(QWidget):
 
     def run_timelapse_generation(self):
         self.log_status("Starting time-lapse...");
+        aoi_name = self.aoi_name_input.text().strip()
+        if aoi_name:
+            self.log_status(f"AOI Name for Timelapse: {aoi_name}")
+
         self.analyze_button.setEnabled(False);
         self.generate_timelapse_button.setEnabled(False)
         self.active_timelapse_start_year = None;
@@ -609,11 +609,16 @@ class GalamseyMonitorApp(QWidget):
             if self.date1_start.date() >= self.date1_end.date(): raise ValueError("Baseline date error.")
             if tl_start_year > tl_end_year: raise ValueError("Timelapse year order error.")
             if QDate(tl_start_year, 1, 1) <= self.date1_end.date(): raise ValueError("Timelapse start after baseline.")
+
+            # Sanitize AOI name for filename, or use a generic part if empty
+            sanitized_aoi_name_part = "".join(
+                c if c.isalnum() else "_" for c in aoi_name) if aoi_name else "unnamed_aoi"
             coord_fn_parts = [str(c).replace('.', 'p').replace('-', 'm') for c in raw_coords_input]
-            video_filename = f"{'_'.join(coord_fn_parts)}_{tl_start_year}-{tl_end_year}_timelapse.mp4"
+            video_filename_base = f"{sanitized_aoi_name_part}_{'_'.join(coord_fn_parts)}_{tl_start_year}-{tl_end_year}_timelapse.mp4"
+
             videos_dir = os.path.join(os.getcwd(), "videos");
             os.makedirs(videos_dir, exist_ok=True)
-            self.final_video_path = os.path.join(videos_dir, video_filename)
+            self.final_video_path = os.path.join(videos_dir, video_filename_base)
             self.log_status(f"Video will be saved to: {self.final_video_path}")
         except ValueError as ve:
             self.log_status(f"Input Error TL: {ve}");
@@ -746,8 +751,7 @@ class GalamseyMonitorApp(QWidget):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setApplicationName("GalamseyMonitorApp")
-    # It's good practice to apply a style for consistency, if desired
-    # app.setStyle("Fusion") # Example: try "Fusion", "Windows", "macOS" (system dependent)
+    # app.setStyle("Fusion")
     monitor_app = GalamseyMonitorApp()
     monitor_app.show()
     sys.exit(app.exec())
