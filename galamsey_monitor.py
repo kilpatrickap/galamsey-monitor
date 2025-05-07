@@ -307,7 +307,7 @@ class TimeLapseWorker(QObject):
                     draw.text((coord_text_x_margin, current_y), text, font=font_type, fill=text_color)
                     current_y += get_text_height("Ay", font_type) + spacing_after
 
-                # Bottom Border
+                # Bottom Border                                                         TODO: Work on black blank space
                 bottom_content_y_start = bordered_frame_height - bottom_border_height + 10
                 try:
                     _, lh_bottom_info = font_bottom_info.getbbox("A")[3], font_bottom_info.getbbox("A")[1]
