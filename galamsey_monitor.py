@@ -331,7 +331,7 @@ class TimeLapseWorker(QObject):
 
                 second_line_y = bottom_content_y_start + lh_bottom_info + 8
 
-                copyright_text = "Copyright Killted Ent 2025"
+                copyright_text = "Copyright KilTech Ent 2025"
                 draw.text((left_border_width + 10, second_line_y), copyright_text, font=font_bottom_info,
                           fill=text_color)
 
