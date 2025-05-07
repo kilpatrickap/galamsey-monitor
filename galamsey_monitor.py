@@ -5,6 +5,7 @@ import traceback
 import os
 import tempfile
 import glob
+# import re # Not strictly needed if using the split/filter/join method for sanitization
 
 import ee
 import requests
@@ -257,10 +258,7 @@ class GalamseyMonitorApp(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Galamsey Monitor")
-
-        # Start with a reasonably large default size, user can resize
         self.setGeometry(10, 40, 1400, 750)
-
         self.worker_thread = None;
         self.worker = None
         self.timelapse_worker_thread = None;
@@ -268,17 +266,14 @@ class GalamseyMonitorApp(QWidget):
         self.progress_dialog = None
         self.project_id = 'galamsey-monitor'
         self.map_html_temp_dir = None
-
         self.active_timelapse_start_year = None;
         self.active_timelapse_end_year = None;
         self.active_timelapse_fps = None
         self.final_video_path = None
-
-        self.media_player = QMediaPlayer()
+        self.media_player = QMediaPlayer();
         self.video_widget = QVideoWidget()
         self.media_player.setVideoOutput(self.video_widget)
         self.video_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-
         self.play_button = QPushButton();
         self.play_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay));
         self.play_button.setEnabled(False)
@@ -288,26 +283,19 @@ class GalamseyMonitorApp(QWidget):
         self.position_slider.sliderMoved.connect(self.set_video_position_from_slider);
         self.position_slider.setEnabled(False)
         self.year_label_for_slider = QLabel("Year: -")
-
         self.media_player.playbackStateChanged.connect(self.media_state_changed);
         self.media_player.positionChanged.connect(self.video_position_changed)
         self.media_player.durationChanged.connect(self.video_duration_changed);
         self.media_player.errorOccurred.connect(self.handle_media_player_error)
-
         main_layout = QVBoxLayout(self)
-
-        # --- Top Section: Analysis Controls and Map (Horizontal Splitter) ---
-        single_analysis_group = QGroupBox("Single Period Analysis")
+        single_analysis_group = QGroupBox("Single Period Analysis");
         single_analysis_form_layout = QFormLayout()
-
-        # AOI Name input
-        self.aoi_name_label = QLabel("AOI:")
-        self.aoi_name_input = QLineEdit()
-        self.aoi_name_input.setPlaceholderText("e.g., Anyinam")
-        self.aoi_name_input.setToolTip("Enter a descriptive name for this Area of Interest (optional).")
+        self.aoi_name_label = QLabel("AOI:");
+        self.aoi_name_input = QLineEdit();
+        self.aoi_name_input.setPlaceholderText("Anyinam");
+        self.aoi_name_input.setToolTip("Enter a descriptive name for this Area of Interest (Mandatory for Video).")
         single_analysis_form_layout.addRow(self.aoi_name_label, self.aoi_name_input)
-
-        self.coord_input = QLineEdit("6.401452, -0.594587, 6.355603, -0.496084")
+        self.coord_input = QLineEdit("6.401452, -0.594587, 6.355603, -0.496084");
         self.coord_input.setToolTip("Enter coordinates as: Lat1, Lon1, Lat2, Lon2 (e.g., 6.3, -1.8, 6.4, -1.7)")
         self.date1_start = QDateEdit(QDate(2020, 1, 1));
         self.date1_end = QDateEdit(QDate(2020, 12, 31))
@@ -320,7 +308,6 @@ class GalamseyMonitorApp(QWidget):
         self.analyze_button = QPushButton("Analyze Single Period")
         for dt_edit in [self.date1_start, self.date1_end, self.date2_start, self.date2_end]: dt_edit.setCalendarPopup(
             True); dt_edit.setDisplayFormat("dd-MM-yyyy")
-
         single_analysis_form_layout.addRow(QLabel("AOI Coords (Lat1, Lon1, Lat2, Lon2):"), self.coord_input)
         single_analysis_form_layout.addRow(QLabel("Period 1 Start (Baseline):"), self.date1_start);
         single_analysis_form_layout.addRow(QLabel("Period 1 End (Baseline):"), self.date1_end)
@@ -330,92 +317,73 @@ class GalamseyMonitorApp(QWidget):
         single_analysis_form_layout.addRow(self.analyze_button)
         single_analysis_group.setLayout(single_analysis_form_layout);
         single_analysis_group.setMinimumWidth(450)
-
-        map_group = QGroupBox("Interactive Map Preview (Red shows potential vegetation loss)")
+        map_group = QGroupBox("Interactive Map Preview (Red shows potential vegetation loss)");
         map_v_layout = QVBoxLayout()
-        self.map_view = QWebEngineView()
-        self.map_view.settings().setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
-        self.map_view.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
+        self.map_view = QWebEngineView();
+        self.map_view.settings().setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True);
+        self.map_view.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True);
         self.map_view.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
         self.map_view.setHtml(
-            "<html><body style='display:flex;justify-content:center;align-items:center;height:100%;font-family:sans-serif;color:grey;'><p>Map will appear here after analysis.</p></body></html>")
+            "<html><body style='display:flex;justify-content:center;align-items:center;height:100%;font-family:sans-serif;color:grey;'><p>Map will appear here after analysis.</p></body></html>");
         self.map_view.setMinimumSize(400, 300)
-        map_v_layout.addWidget(self.map_view)
+        map_v_layout.addWidget(self.map_view);
         map_group.setLayout(map_v_layout)
-
-        top_h_splitter = QSplitter(Qt.Orientation.Horizontal)
-        top_h_splitter.addWidget(single_analysis_group)
-        top_h_splitter.addWidget(map_group)
+        top_h_splitter = QSplitter(Qt.Orientation.Horizontal);
+        top_h_splitter.addWidget(single_analysis_group);
+        top_h_splitter.addWidget(map_group);
         top_h_splitter.setSizes([380, 800])
-
-        # --- Time-Lapse and Video Player Section ---
-        timelapse_video_group = QGroupBox("Time-Lapse Video")
+        timelapse_video_group = QGroupBox("Time-Lapse Video");
         main_timelapse_h_layout = QHBoxLayout()
-
-        timelapse_controls_panel = QWidget()
-        left_v_layout = QVBoxLayout(timelapse_controls_panel)
+        timelapse_controls_panel = QWidget();
+        left_v_layout = QVBoxLayout(timelapse_controls_panel);
         left_v_layout.setContentsMargins(0, 5, 5, 5)
-
-        self.timelapse_start_year_input = QSpinBox()
-        self.timelapse_start_year_input.setRange(2000, QDate.currentDate().year())
+        self.timelapse_start_year_input = QSpinBox();
+        self.timelapse_start_year_input.setRange(2000, QDate.currentDate().year());
         self.timelapse_start_year_input.setValue(2021)
-        self.timelapse_end_year_input = QSpinBox()
-        self.timelapse_end_year_input.setRange(2000, QDate.currentDate().year() + 5)
+        self.timelapse_end_year_input = QSpinBox();
+        self.timelapse_end_year_input.setRange(2000, QDate.currentDate().year() + 5);
         self.timelapse_end_year_input.setValue(QDate.currentDate().year())
-        self.timelapse_fps_input = QSpinBox()
-        self.timelapse_fps_input.setRange(1, 30)
+        self.timelapse_fps_input = QSpinBox();
+        self.timelapse_fps_input.setRange(1, 30);
         self.timelapse_fps_input.setValue(1)
         self.generate_timelapse_button = QPushButton("Generate & Load Time-Lapse Video")
-
-        timelapse_form_inputs_layout = QFormLayout()
-        timelapse_form_inputs_layout.addRow(QLabel("Time-Lapse Start Year:"), self.timelapse_start_year_input)
-        timelapse_form_inputs_layout.addRow(QLabel("Time-Lapse End Year:"), self.timelapse_end_year_input)
+        timelapse_form_inputs_layout = QFormLayout();
+        timelapse_form_inputs_layout.addRow(QLabel("Time-Lapse Start Year:"), self.timelapse_start_year_input);
+        timelapse_form_inputs_layout.addRow(QLabel("Time-Lapse End Year:"), self.timelapse_end_year_input);
         timelapse_form_inputs_layout.addRow(QLabel("Video FPS:"), self.timelapse_fps_input)
-
-        left_v_layout.addLayout(timelapse_form_inputs_layout)
-        left_v_layout.addWidget(self.generate_timelapse_button)
+        left_v_layout.addLayout(timelapse_form_inputs_layout);
+        left_v_layout.addWidget(self.generate_timelapse_button);
         left_v_layout.addStretch(1)
-
-        timelapse_controls_panel.setMinimumWidth(220)
+        timelapse_controls_panel.setMinimumWidth(220);
         timelapse_controls_panel.setMaximumWidth(300)
-
-        video_display_panel = QWidget()
-        right_v_layout = QVBoxLayout(video_display_panel)
+        video_display_panel = QWidget();
+        right_v_layout = QVBoxLayout(video_display_panel);
         right_v_layout.setContentsMargins(0, 0, 0, 0)
-
-        video_player_controls_layout = QHBoxLayout()
-        video_player_controls_layout.addWidget(self.play_button)
-        video_player_controls_layout.addWidget(self.position_slider, 1)
+        video_player_controls_layout = QHBoxLayout();
+        video_player_controls_layout.addWidget(self.play_button);
+        video_player_controls_layout.addWidget(self.position_slider, 1);
         video_player_controls_layout.addWidget(self.year_label_for_slider)
-
-        right_v_layout.addWidget(self.video_widget, 1)
-        right_v_layout.addLayout(video_player_controls_layout)
+        right_v_layout.addWidget(self.video_widget, 1);
+        right_v_layout.addLayout(video_player_controls_layout);
         self.video_widget.setMinimumHeight(200)
-
-        main_timelapse_h_layout.addWidget(timelapse_controls_panel)
-        main_timelapse_h_layout.addWidget(video_display_panel, 1)
+        main_timelapse_h_layout.addWidget(timelapse_controls_panel);
+        main_timelapse_h_layout.addWidget(video_display_panel, 1);
         timelapse_video_group.setLayout(main_timelapse_h_layout)
-
-        # --- Status Log Section ---
-        status_group = QGroupBox("Status Log")
+        status_group = QGroupBox("Status Log");
         status_v_layout = QVBoxLayout();
         self.status_log = QTextEdit();
         self.status_log.setReadOnly(True);
-        self.status_log.setMinimumHeight(80)
+        self.status_log.setMinimumHeight(80);
         self.status_log.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         status_v_layout.addWidget(self.status_log);
         status_group.setLayout(status_v_layout);
-
-        # --- Main Vertical Splitter ---
-        main_v_splitter = QSplitter(Qt.Orientation.Vertical)
-        main_v_splitter.addWidget(top_h_splitter)
-        main_v_splitter.addWidget(timelapse_video_group)
-        main_v_splitter.addWidget(status_group)
+        main_v_splitter = QSplitter(Qt.Orientation.Vertical);
+        main_v_splitter.addWidget(top_h_splitter);
+        main_v_splitter.addWidget(timelapse_video_group);
+        main_v_splitter.addWidget(status_group);
         main_v_splitter.setSizes([450, 280, 170])
-
         main_layout.addWidget(main_v_splitter)
-
-        self.analyze_button.clicked.connect(self.run_single_analysis)
+        self.analyze_button.clicked.connect(self.run_single_analysis);
         self.generate_timelapse_button.clicked.connect(self.run_timelapse_generation)
         self.init_gee_check()
 
@@ -423,10 +391,8 @@ class GalamseyMonitorApp(QWidget):
         self.log_status("Attempting GEE init...");
         try:
             ee.Initialize(project=self.project_id);
-            self.log_status(
-                f"GEE init OK (Project: {self.project_id}).");
-            ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED').limit(
-                1).size().getInfo();
+            self.log_status(f"GEE init OK (Project: {self.project_id}).");
+            ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED').limit(1).size().getInfo();
             self.log_status("GEE test OK.")
         except Exception as e:
             self.handle_gee_init_error(e)
@@ -440,15 +406,14 @@ class GalamseyMonitorApp(QWidget):
         self.generate_timelapse_button.setEnabled(False)
 
     def log_status(self, message):
-        self.status_log.append(message);
-        QApplication.processEvents()
+        self.status_log.append(message); QApplication.processEvents()
 
     def setup_progress_dialog(self, title="Processing..."):
         if self.progress_dialog and self.progress_dialog.isVisible(): self.progress_dialog.close()
         self.progress_dialog = QProgressDialog(title, "Cancel", 0, 100, self);
         self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal);
         self.progress_dialog.setAutoClose(False);
-        self.progress_dialog.setAutoReset(False)
+        self.progress_dialog.setAutoReset(False);
         self.progress_dialog.setMinimumDuration(0);
         self.progress_dialog.setValue(0);
         return self.progress_dialog
@@ -463,17 +428,13 @@ class GalamseyMonitorApp(QWidget):
         lat1, lon1, lat2, lon2 = raw_coords_float
         if not (-90 <= lat1 <= 90 and -90 <= lat2 <= 90): raise ValueError("Latitudes must be -90 to 90.")
         if not (-180 <= lon1 <= 180 and -180 <= lon2 <= 180): raise ValueError("Longitudes must be -180 to 180.")
-        aoi_ee_rect_coords = [min(lon1, lon2), min(lat1, lat2), max(lon1, lon2),
-                              max(lat1, lat2)]
+        aoi_ee_rect_coords = [min(lon1, lon2), min(lat1, lat2), max(lon1, lon2), max(lat1, lat2)];
         return raw_coords_float, aoi_ee_rect_coords
 
     def run_single_analysis(self):
         self.log_status("Starting single period analysis (interactive map)...");
-        # Optionally, log the AOI name if provided
         aoi_name = self.aoi_name_input.text().strip()
-        if aoi_name:
-            self.log_status(f"AOI Name: {aoi_name}")
-
+        if aoi_name: self.log_status(f"AOI Name: {aoi_name}")
         self.analyze_button.setEnabled(False);
         self.generate_timelapse_button.setEnabled(False)
         self.map_view.setHtml(
@@ -484,16 +445,15 @@ class GalamseyMonitorApp(QWidget):
             end1 = self.date1_end.date().toString("yyyy-MM-dd")
             start2 = self.date2_start.date().toString("yyyy-MM-dd");
             end2 = self.date2_end.date().toString("yyyy-MM-dd")
-            if self.date1_start.date() >= self.date1_end.date() or self.date2_start.date() >= self.date2_end.date() or self.date1_end.date() >= self.date2_start.date():
-                raise ValueError("Date ranges invalid/overlapping.")
+            if self.date1_start.date() >= self.date1_end.date() or self.date2_start.date() >= self.date2_end.date() or self.date1_end.date() >= self.date2_start.date(): raise ValueError(
+                "Date ranges invalid/overlapping.")
         except ValueError as ve:
             self.log_status(f"Input Error: {ve}");
-            QMessageBox.warning(self, "Input Error", str(ve))
+            QMessageBox.warning(self, "Input Error", str(ve));
             self.map_view.setHtml(f"<html><body><h2>Input Error:</h2><pre>{ve}</pre></body></html>")
             self.analyze_button.setEnabled(True);
             self.generate_timelapse_button.setEnabled(True);
             return
-
         pd = self.setup_progress_dialog("Single Analysis in Progress...");
         pd.setRange(0, 0);
         pd.canceled.connect(self.cancel_single_analysis);
@@ -501,86 +461,71 @@ class GalamseyMonitorApp(QWidget):
         self.worker = GEEWorker(aoi_ee_rect_coords, start1, end1, start2, end2, self.threshold_input.value(),
                                 project_id=self.project_id)
         self.worker_thread = threading.Thread(target=self.worker.run, daemon=True)
-        self.worker.signals.finished.connect(self.on_single_analysis_complete_map)
-        self.worker.signals.error.connect(self.on_single_analysis_error_map)
+        self.worker.signals.finished.connect(self.on_single_analysis_complete_map);
+        self.worker.signals.error.connect(self.on_single_analysis_error_map);
         self.worker.signals.progress.connect(self.update_progress_label_only);
         self.worker_thread.start()
 
     def update_progress_label_only(self, message):
         self.log_status(message)
-        if self.progress_dialog and self.progress_dialog.isVisible():
-            QMetaObject.invokeMethod(self.progress_dialog, "setLabelText", Qt.ConnectionType.QueuedConnection,
-                                     Q_ARG(str, message))
+        if self.progress_dialog and self.progress_dialog.isVisible(): QMetaObject.invokeMethod(self.progress_dialog,
+                                                                                               "setLabelText",
+                                                                                               Qt.ConnectionType.QueuedConnection,
+                                                                                               Q_ARG(str, message))
 
     def on_single_analysis_complete_map(self, analysis_data):
-        self.log_status("Single analysis (map data) received.")
+        self.log_status("Single analysis (map data) received.");
         if self.progress_dialog: self.progress_dialog.close()
-
-        map_id_dict = analysis_data.get('map_id_dict')
+        map_id_dict = analysis_data.get('map_id_dict');
         aoi_bounds_gee = analysis_data.get('aoi_bounds')
-
         if not map_id_dict or not aoi_bounds_gee:
-            self.log_status("Error: MapID or AOI bounds missing from GEE result.")
+            self.log_status("Error: MapID or AOI bounds missing from GEE result.");
             self.map_view.setHtml(
                 "<html><body><h2>Error:</h2><p>Could not retrieve map data from GEE.</p></body></html>")
             self.analyze_button.setEnabled(True);
-            self.generate_timelapse_button.setEnabled(True)
+            self.generate_timelapse_button.setEnabled(True);
             return
-
         try:
-            lons = [p[0] for p in aoi_bounds_gee]
-            lats = [p[1] for p in aoi_bounds_gee]
-            center_lon = (min(lons) + max(lons)) / 2
+            lons = [p[0] for p in aoi_bounds_gee];
+            lats = [p[1] for p in aoi_bounds_gee];
+            center_lon = (min(lons) + max(lons)) / 2;
             center_lat = (min(lats) + max(lats)) / 2
-
             folium_map = folium.Map(location=[center_lat, center_lon], zoom_start=12, tiles=None)
-            folium.TileLayer(
-                tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}',
-                attr='Google', name='Google Hybrid', overlay=False, control=True, show=True
-            ).add_to(folium_map)
-            folium.TileLayer(
-                tiles='https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}',
-                attr='Google', name='Google Roadmap', overlay=False, control=True
-            ).add_to(folium_map)
-            folium.TileLayer(
-                tiles=map_id_dict['tile_fetcher'].url_format,
-                attr='Google Earth Engine Analysis',
-                name='GEE Analysis Layer',
-                overlay=True, control=True, show=True, max_native_zoom=18
-            ).add_to(folium_map)
+            folium.TileLayer(tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google',
+                             name='Google Hybrid', overlay=False, control=True, show=True).add_to(folium_map)
+            folium.TileLayer(tiles='https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', attr='Google',
+                             name='Google Roadmap', overlay=False, control=True).add_to(folium_map)
+            folium.TileLayer(tiles=map_id_dict['tile_fetcher'].url_format, attr='Google Earth Engine Analysis',
+                             name='GEE Analysis Layer', overlay=True, control=True, show=True,
+                             max_native_zoom=18).add_to(folium_map)
             folium.LayerControl().add_to(folium_map)
-
             if self.map_html_temp_dir:
                 try:
                     self.map_html_temp_dir.cleanup()
                 except Exception as e_clean:
                     self.log_status(f"Note: Error cleaning up previous map temp dir: {e_clean}")
-
-            self.map_html_temp_dir = tempfile.TemporaryDirectory(prefix="galamsey_map_html_")
+            self.map_html_temp_dir = tempfile.TemporaryDirectory(prefix="galamsey_map_html_");
             map_html_path = os.path.join(self.map_html_temp_dir.name, "interactive_map.html")
-
-            folium_map.save(map_html_path)
-            self.log_status(f"Interactive map saved to: {map_html_path}")
-            self.map_view.setUrl(QUrl.fromLocalFile(os.path.abspath(map_html_path)))
+            folium_map.save(map_html_path);
+            self.log_status(f"Interactive map saved to: {map_html_path}");
+            self.map_view.setUrl(QUrl.fromLocalFile(os.path.abspath(map_html_path)));
             self.log_status("Interactive map loaded.")
-
         except Exception as e:
-            self.log_status(f"Error creating/displaying Folium map: {e}")
-            self.map_view.setHtml(f"<html><body><h2>Map Display Error:</h2><pre>{e}</pre></body></html>")
-
+            self.log_status(f"Error creating/displaying Folium map: {e}"); self.map_view.setHtml(
+                f"<html><body><h2>Map Display Error:</h2><pre>{e}</pre></body></html>")
         self.analyze_button.setEnabled(True);
         self.generate_timelapse_button.setEnabled(True)
 
     def on_single_analysis_error_map(self, error_message):
-        self.log_status(f"Single Analysis (map) Error: {error_message}")
-        if self.progress_dialog: self.progress_dialog.close()
-        QMessageBox.critical(self, "Single Analysis Error", error_message)
+        self.log_status(f"Single Analysis (map) Error: {error_message}");
+        if self.progress_dialog: self.progress_dialog.close(); QMessageBox.critical(self, "Single Analysis Error",
+                                                                                    error_message)
         self.map_view.setHtml(f"<html><body><h2>Analysis Failed:</h2><pre>{error_message}</pre></body></html>")
         self.analyze_button.setEnabled(True);
         self.generate_timelapse_button.setEnabled(True)
 
     def cancel_single_analysis(self):
-        self.log_status("Attempting to cancel single analysis...")
+        self.log_status("Attempting to cancel single analysis...");
         if self.worker: self.worker.is_cancelled = True
         if self.progress_dialog: self.progress_dialog.close()
         self.map_view.setHtml(
@@ -590,9 +535,32 @@ class GalamseyMonitorApp(QWidget):
 
     def run_timelapse_generation(self):
         self.log_status("Starting time-lapse...");
-        aoi_name = self.aoi_name_input.text().strip()
-        if aoi_name:
-            self.log_status(f"AOI Name for Timelapse: {aoi_name}")
+
+        # --- MANDATORY AOI NAME CHECK ---
+        aoi_name_from_input = self.aoi_name_input.text().strip()
+        if not aoi_name_from_input:
+            self.log_status("Input Error TL: AOI name is mandatory for video generation.");
+            QMessageBox.warning(self, "Input Error",
+                                "AOI name is mandatory for video generation.\nPlease enter a name in the 'AOI:' field.")
+            self.analyze_button.setEnabled(True);  # Re-enable buttons
+            self.generate_timelapse_button.setEnabled(True);
+            return
+
+        # Sanitize the AOI name
+        temp_sanitized_aoi_name = "".join(c if c.isalnum() or c == '_' else '_' for c in aoi_name_from_input)
+        final_sanitized_aoi_name = "_".join(s for s in temp_sanitized_aoi_name.split('_') if s)
+
+        if not final_sanitized_aoi_name:
+            self.log_status(
+                f"Input Error TL: AOI name '{aoi_name_from_input}' sanitized to an empty string. Please use alphanumeric characters.");
+            QMessageBox.warning(self, "Input Error",
+                                f"AOI name '{aoi_name_from_input}' is invalid for a filename (e.g., contains only special characters). Please use a name with alphanumeric characters.")
+            self.analyze_button.setEnabled(True);  # Re-enable buttons
+            self.generate_timelapse_button.setEnabled(True);
+            return
+        # --- END MANDATORY AOI NAME CHECK ---
+
+        self.log_status(f"AOI Name for Timelapse: {final_sanitized_aoi_name}")  # Log the sanitized name being used
 
         self.analyze_button.setEnabled(False);
         self.generate_timelapse_button.setEnabled(False)
@@ -610,22 +578,22 @@ class GalamseyMonitorApp(QWidget):
             if tl_start_year > tl_end_year: raise ValueError("Timelapse year order error.")
             if QDate(tl_start_year, 1, 1) <= self.date1_end.date(): raise ValueError("Timelapse start after baseline.")
 
-            # Sanitize AOI name for filename, or use a generic part if empty
-            sanitized_aoi_name_part = "".join(
-                c if c.isalnum() else "_" for c in aoi_name) if aoi_name else "unnamed_aoi"
-            coord_fn_parts = [str(c).replace('.', 'p').replace('-', 'm') for c in raw_coords_input]
-            video_filename_base = f"{sanitized_aoi_name_part}_{'_'.join(coord_fn_parts)}_{tl_start_year}-{tl_end_year}_timelapse.mp4"
+            coord_fn_parts_str = '_'.join([str(c).replace('.', 'p').replace('-', 'm') for c in raw_coords_input])
+            # Filename always starts with the sanitized AOI name
+            video_filename_base = f"{final_sanitized_aoi_name}_{coord_fn_parts_str}_{tl_start_year}-{tl_end_year}_timelapse.mp4"
 
             videos_dir = os.path.join(os.getcwd(), "videos");
             os.makedirs(videos_dir, exist_ok=True)
             self.final_video_path = os.path.join(videos_dir, video_filename_base)
             self.log_status(f"Video will be saved to: {self.final_video_path}")
-        except ValueError as ve:
+
+        except ValueError as ve:  # Catches errors from _parse_coordinates or date checks
             self.log_status(f"Input Error TL: {ve}");
             QMessageBox.warning(self, "Input Error", str(ve))
             self.analyze_button.setEnabled(True);
             self.generate_timelapse_button.setEnabled(True);
             return
+
         pd = self.setup_progress_dialog("Generating Time-Lapse Video...");
         pd.setRange(0, tl_end_year - tl_start_year + 1)
         pd.canceled.connect(self.cancel_timelapse_generation);
@@ -686,17 +654,15 @@ class GalamseyMonitorApp(QWidget):
     def play_video(self):
         if self.media_player.source().isEmpty(): self.log_status("No video loaded."); return
         if self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
-            self.media_player.pause();
-            self.log_status("Video paused.")
+            self.media_player.pause(); self.log_status("Video paused.")
         else:
-            self.media_player.play();
-            self.log_status("Video playing.")
+            self.media_player.play(); self.log_status("Video playing.")
 
     def media_state_changed(self, state: QMediaPlayer.PlaybackState):
         self.play_button.setIcon(self.style().standardIcon(
             QStyle.StandardPixmap.SP_MediaPause if state == QMediaPlayer.PlaybackState.PlayingState else QStyle.StandardPixmap.SP_MediaPlay))
-        if state == QMediaPlayer.PlaybackState.StoppedState and self.active_timelapse_start_year is not None and self.media_player.position() == self.media_player.duration() and self.media_player.duration() > 0:
-            self._update_year_label_for_slider(self.media_player.duration())
+        if state == QMediaPlayer.PlaybackState.StoppedState and self.active_timelapse_start_year is not None and self.media_player.position() == self.media_player.duration() and self.media_player.duration() > 0: self._update_year_label_for_slider(
+            self.media_player.duration())
 
     def _update_year_label_for_slider(self, position_ms):
         if self.active_timelapse_start_year is not None and self.active_timelapse_end_year is not None and self.active_timelapse_fps is not None and self.active_timelapse_fps > 0:
@@ -710,8 +676,7 @@ class GalamseyMonitorApp(QWidget):
             self.year_label_for_slider.setText("Year: -")
 
     def video_position_changed(self, p):
-        self.position_slider.setValue(p);
-        self._update_year_label_for_slider(p)
+        self.position_slider.setValue(p); self._update_year_label_for_slider(p)
 
     def video_duration_changed(self, d):
         self.position_slider.setRange(0, d)
@@ -719,8 +684,7 @@ class GalamseyMonitorApp(QWidget):
             0);self.play_button.setEnabled(False);self.position_slider.setEnabled(False)
 
     def set_video_position_from_slider(self, p):
-        self.media_player.setPosition(p);
-        self._update_year_label_for_slider(p)
+        self.media_player.setPosition(p); self._update_year_label_for_slider(p)
 
     def handle_media_player_error(self):
         self.play_button.setEnabled(False);
@@ -740,8 +704,7 @@ class GalamseyMonitorApp(QWidget):
         self.media_player.stop()
         if self.map_html_temp_dir:
             try:
-                self.map_html_temp_dir.cleanup()
-                self.log_status("Cleaned up temporary map HTML directory.")
+                self.map_html_temp_dir.cleanup(); self.log_status("Cleaned up temporary map HTML directory.")
             except Exception as e:
                 self.log_status(f"Error cleaning up map HTML temp dir on close: {e}")
         self.log_status("Cleanup complete. Exiting.");
