@@ -582,7 +582,7 @@ class GalamseyMonitorApp(QWidget):
         single_analysis_gb.setMinimumWidth(450)
 
         # Interactive Map Group
-        map_gb = QGroupBox("Interactive Map Preview (Red Shows potential Vegetative Loss")
+        map_gb = QGroupBox("Interactive Map Preview (Red Shows potential Vegetative Loss)")
         map_layout = QVBoxLayout()
         self.map_view = QWebEngineView()
         # Enable necessary WebEngine settings
